@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V44 Padding)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V45 Sensitivity)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -79,10 +79,10 @@ def apply_temperature_scaling(probs, temperature=1.0):
     new_probs = exp_logits / np.sum(exp_logits)
     return new_probs
 
-# [V44] 新增 box_padding 參數
-def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding=5, proc_mode="adaptive", manual_thresh=127, use_smart_logic=True, temperature=1.0, show_debug=False):
+# [V45] 新增 dilation_iter 和 use_morph_close 參數
+def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, use_smart_logic, temperature, dilation_iter, use_morph_close, show_debug):
     result_img = image_bgr.copy()
-    h_img_full, w_img_full = result_img.shape[:2] # 取得整張圖的大小，避免框框畫出界
+    h_img_full, w_img_full = result_img.shape[:2]
     
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -100,10 +100,18 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         _, thresh = cv2.threshold(blur, 0, 255, flag)
         binary_proc = thresh
 
-    binary_proc = cv2.dilate(binary_proc, None, iterations=1)
+    # [V45] 強力修補邏輯
+    # 1. 斷筆修補 (Morphology Closing): 先膨脹再侵蝕，把斷掉的線接起來
+    if use_morph_close:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        binary_proc = cv2.morphologyEx(binary_proc, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # 2. 筆畫加粗 (Dilation): 根據使用者設定的次數膨脹
+    if dilation_iter > 0:
+        binary_proc = cv2.dilate(binary_proc, None, iterations=dilation_iter)
     
     if show_debug:
-        st.image(binary_proc, caption=f"【Debug】二值化影像", width=300)
+        st.image(binary_proc, caption=f"【Debug】二值化影像 (處理後)", width=300)
     
     nb, output, stats_cc, _ = cv2.connectedComponentsWithStats(binary_proc, connectivity=8)
     raw_boxes = sorted([stats_cc[i, :4] for i in range(1, nb)], key=lambda b: b[0])
@@ -114,8 +122,10 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 
     for box in raw_boxes:
         x, y, w, h = box
-        if x < 5 or y < 5 or (x + w) > binary_proc.shape[1] - 5 or (y + h) > binary_proc.shape[0] - 5: continue
-        if h < 20: continue 
+        # 放寬邊界檢查：只要不是真的黏在邊框上，都讓它通過
+        if x <= 1 or y <= 1 or (x + w) >= binary_proc.shape[1] - 1 or (y + h) >= binary_proc.shape[0] - 1: continue
+        # 放寬高度檢查
+        if h < 10: continue 
 
         split_results = split_touching_digits(binary_proc[y:y+h, x:x+w])
         
@@ -127,11 +137,14 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             box_area = sw * sh
             density = n_white_pix / float(box_area)
 
+            # Debug: 顯示被過濾的原因
             if n_white_pix < min_area:
-                if show_debug: cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 255), 1)
+                if show_debug: 
+                    cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 255), 1)
                 continue
             if density < min_density:
-                if show_debug: cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 0), 1)
+                if show_debug: 
+                    cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 0), 1)
                 continue
             
             side = max(sw, sh)
@@ -199,16 +212,13 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             
             label = f"#{current_id}"
             
-            # [V44] 計算加了留白(Padding)後的座標，並確保不出界
             pad = box_padding
             p_x1 = max(0, rx - pad)
             p_y1 = max(0, ry - pad)
             p_x2 = min(w_img_full, rx + w + pad)
             p_y2 = min(h_img_full, ry + h + pad)
 
-            # 畫出變大的框框
             cv2.rectangle(result_img, (p_x1, p_y1), (p_x2, p_y2), color, 2)
-            # 文字位置稍微往上移一點，以免被框框蓋住
             cv2.putText(result_img, label, (p_x1, p_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
     return result_img, detected_info
@@ -216,7 +226,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V44 Padding)")
+st.title("🔢 AI 手寫辨識 (V45 Sensitivity)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -238,24 +248,27 @@ if proc_mode_sel == "manual":
 else:
     manual_thresh = 127
 
-# [V44 新增] 框框留白滑桿
-box_padding = st.sidebar.slider("🖼️ 框框留白 (Padding)", 0, 30, 10, help="讓綠色框框往外擴張，不要切到字")
+# [V45 新增] 影像增強參數
+box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10)
+dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 1, help="如果字太細或斷斷續續，請調大這個數值")
+use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補 (Closing)", value=True, help="自動連接斷掉的筆劃")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 辨識邏輯")
-use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正 (Smart Logic)", value=True, help="取消勾選以使用純 AI 預測")
-temperature = st.sidebar.slider("🌡️ 信心溫度 (AI 謙虛度)", 1.0, 5.0, 1.0, 0.1)
+use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正 (Smart Logic)", value=True)
+temperature = st.sidebar.slider("🌡️ 信心溫度", 1.0, 5.0, 1.0, 0.1)
 min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎛️ 靈敏度")
-min_area = st.sidebar.slider("最小面積", 20, 500, 100)
-min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.10)
+# [V45] 預設值調低至 50
+min_area = st.sidebar.slider("最小面積 (過濾雜訊)", 10, 500, 50, help="太小的點會被當作雜訊過濾掉。如果數字不見了，試著調小這個。")
+min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
 show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
 
 def run_app(source_image):
-    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, use_smart_logic, temperature, show_debug)
+    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, use_smart_logic, temperature, dilation_iter, use_morph_close, show_debug)
     
     st.image(result_img, channels="BGR", use_container_width=True)
     
