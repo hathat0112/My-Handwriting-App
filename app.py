@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V37 Inspection)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V38 ID Display)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -77,7 +77,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # V35/V36 處理模式
     if proc_mode == "adaptive":
         binary_proc = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
     elif proc_mode == "manual":
@@ -118,7 +117,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
             box_area = sw * sh
             density = n_white_pix / float(box_area)
 
-            # Debug 畫框
             if n_white_pix < min_area:
                 if show_debug: cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 255), 1)
                 continue
@@ -174,20 +172,24 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
                 if res_id == 9 and not has_hole: res_id, display_text, color = 4, "4*", (0, 255, 255)
                 elif res_id == 4 and has_hole and confidence < 0.95: res_id, display_text, color = 9, "9*", (0, 255, 255)
             
-            # [V37] 儲存切片圖片，為了在介面上顯示
-            # 必須把 roi_original (只有黑白) 轉成 RGB 格式方便顯示
             roi_display = cv2.cvtColor(roi_original, cv2.COLOR_GRAY2RGB)
-            roi_display = cv2.bitwise_not(roi_display) # 反轉顏色變成白底黑字，比較好閱讀
+            roi_display = cv2.bitwise_not(roi_display)
+
+            # 取得目前的編號
+            current_id = len(detected_info) + 1
 
             detected_info.append({
-                "id": len(detected_info) + 1,
+                "id": current_id,
                 "digit": str(res_id), 
                 "confidence": float(confidence),
                 "is_corrected": "*" in display_text,
-                "roi_img": roi_display # 存下圖片
+                "roi_img": roi_display
             })
             
-            label = f"{display_text} ({int(confidence*100)}%)"
+            # [V38 修改] 把編號加到圖片上的標籤裡
+            # 顯示格式： #1: 2 (99%)
+            label = f"#{current_id}: {display_text} ({int(confidence*100)}%)"
+            
             cv2.rectangle(result_img, (rx, ry), (rx+w, ry+h), color, 2)
             cv2.putText(result_img, label, (rx, ry-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
@@ -196,7 +198,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V37 詳細檢測)")
+st.title("🔢 AI 手寫辨識 (V38 編號對照)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -237,36 +239,29 @@ def run_app(source_image):
         st.markdown("---")
         st.subheader("🔍 詳細檢測報告")
 
-        # [V37] 顯示詳細的清單列表
         for item in info_list:
             with st.container():
                 # 分成三欄：[編號/圖片] - [預測結果] - [進度條]
                 c1, c2, c3 = st.columns([1, 1, 3])
                 
                 with c1:
-                    st.caption(f"編號 #{item['id']}")
-                    # 顯示 AI 切下來的那個字的圖片
+                    # 這裡的編號會跟圖片上的 #1, #2 對應
+                    st.metric(label="編號", value=f"#{item['id']}")
                     st.image(item['roi_img'], width=60, clamp=True)
                 
                 with c2:
-                    # 顯示大大的數字
                     st.metric("預測數字", item['digit'], delta="邏輯修正" if item['is_corrected'] else None)
                 
                 with c3:
-                    # 顯示進度條
                     conf = item['confidence']
                     st.markdown(f"**信心度: {int(conf*100)}%**")
                     st.progress(conf)
                     
-                    # 給一點文字評語
-                    if conf > 0.9:
-                        st.caption("🌟 信心十足")
-                    elif conf > 0.7:
-                        st.caption("✅ 還算確定")
-                    else:
-                        st.caption("⚠️ 有點猶豫，建議重寫")
+                    if conf > 0.9: st.caption("🌟 信心十足")
+                    elif conf > 0.7: st.caption("✅ 還算確定")
+                    else: st.caption("⚠️ 有點猶豫")
                 
-                st.divider() # 分隔線
+                st.divider()
 
     else:
         st.warning("⚠️ 未偵測到數字，請調整模式或靈敏度。")
