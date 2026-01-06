@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V42 Fix 7&8)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V44 Padding)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -71,8 +71,18 @@ def analyze_hole_geometry(binary_roi):
     largest_hole_y = valid_holes[0][1]
     return len(valid_holes), largest_hole_y
 
-def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_mode="adaptive", manual_thresh=127, use_smart_logic=True, show_debug=False):
+def apply_temperature_scaling(probs, temperature=1.0):
+    probs = np.clip(probs, 1e-9, 1.0)
+    logits = np.log(probs)
+    scaled_logits = logits / temperature
+    exp_logits = np.exp(scaled_logits - np.max(scaled_logits))
+    new_probs = exp_logits / np.sum(exp_logits)
+    return new_probs
+
+# [V44] 新增 box_padding 參數
+def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding=5, proc_mode="adaptive", manual_thresh=127, use_smart_logic=True, temperature=1.0, show_debug=False):
     result_img = image_bgr.copy()
+    h_img_full, w_img_full = result_img.shape[:2] # 取得整張圖的大小，避免框框畫出界
     
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -136,11 +146,16 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
             coords_to_draw.append((x + offset_x, y, sw, sh, sub_roi))
 
     if len(rois_to_pred) > 0:
-        predictions = cnn_model.predict(np.array(rois_to_pred), verbose=0)
+        raw_predictions = cnn_model.predict(np.array(rois_to_pred), verbose=0)
         
-        for i, pred_probs in enumerate(predictions):
-            res_id = np.argmax(pred_probs)
-            confidence = np.max(pred_probs)
+        for i, pred_probs in enumerate(raw_predictions):
+            if temperature != 1.0:
+                final_probs = apply_temperature_scaling(pred_probs, temperature)
+            else:
+                final_probs = pred_probs
+
+            res_id = np.argmax(final_probs)
+            confidence = np.max(final_probs)
             rx, ry, w, h, roi_original = coords_to_draw[i]
             
             if confidence < min_confidence:
@@ -151,22 +166,16 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
             display_text = str(res_id)
             color = (0, 255, 0)
             
-            # [V42 修正邏輯區域]
             is_corrected = False
             if use_smart_logic:
                 num_holes, hole_y = analyze_hole_geometry(roi_original)
-                
-                # 保留的規則：
                 if res_id == 6:
                     if hole_y is not None and hole_y < 0.58: res_id, display_text, color = 0, "0*", (0, 255, 255)
-                # ❌ 刪除 8 轉 0
-                # ❌ 刪除 7 轉 1 (瘦長檢查)
                 elif res_id == 2:
                     h_r, w_r = roi_original.shape
                     pts = cv2.findNonZero(roi_original[int(h_r*0.7):, :])
                     if pts is not None and cv2.boundingRect(pts)[2] < w_r * 0.5:
                         res_id, display_text, color = 7, "7*", (0, 255, 255)
-                # ❌ 刪除 7 的長寬比檢查 (原 res_id == 7 區塊已刪除)
                 elif res_id == 4 or res_id == 9:
                     has_hole = (num_holes > 0)
                     if res_id == 9 and not has_hole: res_id, display_text, color = 4, "4*", (0, 255, 255)
@@ -189,15 +198,25 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
             })
             
             label = f"#{current_id}"
-            cv2.rectangle(result_img, (rx, ry), (rx+w, ry+h), color, 2)
-            cv2.putText(result_img, label, (rx, ry-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            # [V44] 計算加了留白(Padding)後的座標，並確保不出界
+            pad = box_padding
+            p_x1 = max(0, rx - pad)
+            p_y1 = max(0, ry - pad)
+            p_x2 = min(w_img_full, rx + w + pad)
+            p_y2 = min(h_img_full, ry + h + pad)
+
+            # 畫出變大的框框
+            cv2.rectangle(result_img, (p_x1, p_y1), (p_x2, p_y2), color, 2)
+            # 文字位置稍微往上移一點，以免被框框蓋住
+            cv2.putText(result_img, label, (p_x1, p_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
     return result_img, detected_info
 
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V42 Fix 7&8)")
+st.title("🔢 AI 手寫辨識 (V44 Padding)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -219,10 +238,14 @@ if proc_mode_sel == "manual":
 else:
     manual_thresh = 127
 
+# [V44 新增] 框框留白滑桿
+box_padding = st.sidebar.slider("🖼️ 框框留白 (Padding)", 0, 30, 10, help="讓綠色框框往外擴張，不要切到字")
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 辨識邏輯")
 use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正 (Smart Logic)", value=True, help="取消勾選以使用純 AI 預測")
-min_confidence = st.sidebar.slider("信心過濾器", 0.5, 1.0, 0.60) 
+temperature = st.sidebar.slider("🌡️ 信心溫度 (AI 謙虛度)", 1.0, 5.0, 1.0, 0.1)
+min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎛️ 靈敏度")
@@ -232,7 +255,7 @@ show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
 
 def run_app(source_image):
-    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, proc_mode_sel, manual_thresh, use_smart_logic, show_debug)
+    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, use_smart_logic, temperature, show_debug)
     
     st.image(result_img, channels="BGR", use_container_width=True)
     
@@ -257,9 +280,9 @@ def run_app(source_image):
                     st.markdown(f"**信心度: {int(conf*100)}%**")
                     st.progress(conf)
                     
-                    if conf > 0.9: st.caption("🌟 信心十足")
-                    elif conf > 0.7: st.caption("✅ 還算確定")
-                    else: st.caption("⚠️ 有點猶豫")
+                    if conf > 0.8: st.caption("🌟 很有把握")
+                    elif conf > 0.5: st.caption("🤔 有點像...")
+                    else: st.caption("⚠️ 幾乎是在用猜的")
                 
                 st.divider()
 
