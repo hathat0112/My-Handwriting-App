@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V48 Clean)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V49 Guide)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -131,8 +131,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             box_area = sw * sh
             density = n_white_pix / float(box_area)
 
-            # [V48 修改] 移除紫色(面積太小)與藍色(密度太低)的框框繪製
-            # 這裡只做過濾，不再畫圖
             if n_white_pix < min_area:
                 continue
             if density < min_density:
@@ -162,7 +160,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             confidence = np.max(final_probs)
             rx, ry, w, h, roi_original = coords_to_draw[i]
             
-            # [V48 修改] 信心不足(紅色框)也移除，保持畫面乾淨
             if confidence < min_confidence:
                 continue
 
@@ -216,7 +213,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V48 Clean)")
+st.title("🔢 AI 手寫辨識 (V49 Smart Guide)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -227,41 +224,35 @@ proc_mode_sel = st.sidebar.radio(
     "選擇演算法",
     ("otsu", "adaptive", "manual"),
     format_func=lambda x: {
-        "otsu": "標準模式 (純黑背景)",
+        "otsu": "標準模式 (適合純黑手寫板)",
         "adaptive": "📄 拍照模式 (抗陰影)",
         "manual": "🎚️ 手動門檻"
     }[x],
-    index=1 if mode_option != "✍️ 手寫板" else 0,
-    help="Otsu: 電腦生成的圖片用。Adaptive: 手機拍紙張用。"
+    index=1 if mode_option != "✍️ 手寫板" else 0
 )
 if proc_mode_sel == "manual":
-    manual_thresh = st.sidebar.slider("二值化門檻", 0, 255, 127, help="越低越黑，越高越白")
+    manual_thresh = st.sidebar.slider("二值化門檻", 0, 255, 127)
 else:
     manual_thresh = 127
 
-box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10, help="把綠色框框往外擴大，避免切到字的邊緣")
-dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 1, help="讓筆劃變粗，幫助 AI 看到太細的字")
+box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10, help="如果覺得綠色框框太貼，可以調大這個")
+
+# [V49 修改] 增加白話文說明
+dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 2, help="【重要】如果字寫太細或斷斷續續，請把這個調大！")
 use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True, help="自動把斷掉的筆劃連起來")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 辨識邏輯")
-use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正", value=True, help="如果 AI 把 7 判成 1，嘗試關閉此選項")
-temperature = st.sidebar.slider("🌡️ 信心溫度", 1.0, 5.0, 1.0, 0.1, help="數值越高，AI 越謙虛 (信心度會下降)")
-min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40, help="信心低於此分數的字會被當作雜訊丟掉") 
+use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正", value=True)
+temperature = st.sidebar.slider("🌡️ 信心溫度", 1.0, 5.0, 1.0, 0.1)
+min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🎛️ 靈敏度")
-min_area = st.sidebar.slider("最小面積 (過濾雜訊)", 10, 500, 20, help="太小的點(灰塵)會被過濾掉。如果字不見了，調小這個。")
-min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05, help="如果框框裡太空(例如只有一個小點)，會被過濾掉")
-show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False, help="勾選後會顯示 AI 看到的黑白畫面")
-
-with st.sidebar.expander("📖 參數新手指南"):
-    st.markdown("""
-    **自動辨識中...**
-    現在不需要按按鈕了：
-    * **手寫板**：停筆後自動辨識
-    * **拍照/上傳**：選好圖片自動辨識
-    """)
+st.sidebar.subheader("🎛️ 靈敏度 (重要)")
+# [V49 修改] 說明更直白，預設值設為更安全的 50
+min_area = st.sidebar.slider("最小面積 (數字不見調這裡)", 10, 500, 50, help="【最重要】如果你寫的字不見了，請把這個數值「往左拉」！如果雜訊太多，請「往右拉」。")
+min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
+show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
 def run_app(source_image):
     result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, use_smart_logic, temperature, dilation_iter, use_morph_close, show_debug)
@@ -275,7 +266,6 @@ def run_app(source_image):
         if info_list:
             st.success(f"✅ 找到 {len(info_list)} 個數字")
             st.markdown("### 詳細結果")
-            
             with st.container(height=500):
                 for item in info_list:
                     cols = st.columns([1, 1, 2])
@@ -290,7 +280,17 @@ def run_app(source_image):
                         st.progress(conf)
                     st.divider()
         else:
-            st.warning("⚠️ 畫面中未發現數字")
+            # [V49] 智慧偵測：如果完全沒抓到字，跳出黃色警語教使用者怎麼做
+            st.warning("⚠️ 畫面中未發現數字！")
+            
+            st.info("""
+            **💡 小撇步：如何找回消失的字？**
+            
+            請嘗試調整左邊側邊欄的設定：
+            1. 📉 **調低「最小面積」** (試試看 20 或 30)
+            2. 🐡 **調大「筆畫膨脹」** (試試看 2 或 3)
+            3. 🖼️ 檢查 **影像處理模式** 是否選對 (拍照請選「拍照模式」)
+            """)
 
 # 介面渲染
 if mode_option == "✍️ 手寫板":
