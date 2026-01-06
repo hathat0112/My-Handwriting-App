@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V47 Auto)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V48 Clean)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -131,11 +131,11 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             box_area = sw * sh
             density = n_white_pix / float(box_area)
 
+            # [V48 修改] 移除紫色(面積太小)與藍色(密度太低)的框框繪製
+            # 這裡只做過濾，不再畫圖
             if n_white_pix < min_area:
-                if show_debug: cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 255), 1)
                 continue
             if density < min_density:
-                if show_debug: cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 0), 1)
                 continue
             
             side = max(sw, sh)
@@ -162,9 +162,8 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             confidence = np.max(final_probs)
             rx, ry, w, h, roi_original = coords_to_draw[i]
             
+            # [V48 修改] 信心不足(紅色框)也移除，保持畫面乾淨
             if confidence < min_confidence:
-                if show_debug:
-                    cv2.rectangle(result_img, (rx, ry), (rx+w, ry+h), (0, 0, 255), 1)
                 continue
 
             display_text = str(res_id)
@@ -217,7 +216,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V47 Auto)")
+st.title("🔢 AI 手寫辨識 (V48 Clean)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -232,28 +231,29 @@ proc_mode_sel = st.sidebar.radio(
         "adaptive": "📄 拍照模式 (抗陰影)",
         "manual": "🎚️ 手動門檻"
     }[x],
-    index=1 if mode_option != "✍️ 手寫板" else 0
+    index=1 if mode_option != "✍️ 手寫板" else 0,
+    help="Otsu: 電腦生成的圖片用。Adaptive: 手機拍紙張用。"
 )
 if proc_mode_sel == "manual":
-    manual_thresh = st.sidebar.slider("二值化門檻", 0, 255, 127)
+    manual_thresh = st.sidebar.slider("二值化門檻", 0, 255, 127, help="越低越黑，越高越白")
 else:
     manual_thresh = 127
 
-box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10)
-dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 1)
-use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True)
+box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10, help="把綠色框框往外擴大，避免切到字的邊緣")
+dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 1, help="讓筆劃變粗，幫助 AI 看到太細的字")
+use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True, help="自動把斷掉的筆劃連起來")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 辨識邏輯")
-use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正", value=True)
-temperature = st.sidebar.slider("🌡️ 信心溫度", 1.0, 5.0, 1.0, 0.1)
-min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
+use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正", value=True, help="如果 AI 把 7 判成 1，嘗試關閉此選項")
+temperature = st.sidebar.slider("🌡️ 信心溫度", 1.0, 5.0, 1.0, 0.1, help="數值越高，AI 越謙虛 (信心度會下降)")
+min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40, help="信心低於此分數的字會被當作雜訊丟掉") 
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎛️ 靈敏度")
-min_area = st.sidebar.slider("最小面積", 10, 500, 50)
-min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
-show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
+min_area = st.sidebar.slider("最小面積 (過濾雜訊)", 10, 500, 20, help="太小的點(灰塵)會被過濾掉。如果字不見了，調小這個。")
+min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05, help="如果框框裡太空(例如只有一個小點)，會被過濾掉")
+show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False, help="勾選後會顯示 AI 看到的黑白畫面")
 
 with st.sidebar.expander("📖 參數新手指南"):
     st.markdown("""
@@ -266,7 +266,6 @@ with st.sidebar.expander("📖 參數新手指南"):
 def run_app(source_image):
     result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, use_smart_logic, temperature, dilation_iter, use_morph_close, show_debug)
     
-    # [V47] 版面調整：左邊顯示大圖，右邊直接顯示詳細清單
     c1, c2 = st.columns([3, 2])
     
     with c1:
@@ -277,10 +276,8 @@ def run_app(source_image):
             st.success(f"✅ 找到 {len(info_list)} 個數字")
             st.markdown("### 詳細結果")
             
-            # 使用 Scrollable Container (如果清單很長)
             with st.container(height=500):
                 for item in info_list:
-                    # 每一列顯示一個數字的卡片
                     cols = st.columns([1, 1, 2])
                     with cols[0]:
                         st.caption(f"#{item['id']}")
@@ -297,7 +294,6 @@ def run_app(source_image):
 
 # 介面渲染
 if mode_option == "✍️ 手寫板":
-    # [V47] 移除 col2 的按鈕區，直接顯示畫布
     canvas_result = st_canvas(
         fill_color="rgba(255, 165, 0, 0.3)", 
         stroke_width=20, 
@@ -307,12 +303,10 @@ if mode_option == "✍️ 手寫板":
         width=600, 
         drawing_mode="freedraw", 
         key="canvas",
-        update_streamlit=True # [重要] 這讓畫布每次停筆都會自動刷新
+        update_streamlit=True
     )
     
-    # 自動執行辨識
     if canvas_result.image_data is not None:
-        # 簡單檢查一下是不是全黑(沒寫字)，避免一直閃爍
         if np.max(canvas_result.image_data) > 0:
             img_data = canvas_result.image_data.astype(np.uint8)
             img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGBA2BGR)
@@ -329,9 +323,7 @@ elif mode_option in ["📷 拍照辨識", "📂 上傳圖片"]:
     if file:
         bytes_data = file.getvalue()
         cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-        # 上傳模式下顯示一下原始圖 (拍照模式就不重複顯示了，因為 camera_input 本身就有預覽)
         if mode_option == "📂 上傳圖片": 
             st.image(cv2_img, caption="原始圖", width=200, channels="BGR")
         
-        # 自動執行辨識 (移除按鈕)
         run_app(cv2_img)
