@@ -5,11 +5,12 @@ import numpy as np
 import tensorflow as tf
 from PIL import Image
 import os
+import pandas as pd # 新增這個，用來做漂亮的表格
 
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V31 Tuned)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V33 Confidence)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -29,7 +30,6 @@ cnn_model = load_model()
 #              核心演算法
 # ==========================================
 def center_by_moments_cnn(src):
-    """將影像重心對齊"""
     img = src.copy()
     m = cv2.moments(img, True)
     if m['m00'] < 0.1: return cv2.resize(img, (28, 28))
@@ -39,7 +39,6 @@ def center_by_moments_cnn(src):
     return cv2.warpAffine(img, M, (28, 28), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 def split_touching_digits(roi_binary):
-    """切割連字"""
     h, w = roi_binary.shape
     if w / h < 1.2: return [(0, roi_binary)]
     projection = np.sum(roi_binary, axis=0)
@@ -53,7 +52,6 @@ def split_touching_digits(roi_binary):
     return [(0, part1), (split_x, part2)]
 
 def analyze_hole_geometry(binary_roi):
-    """分析洞的數量與位置"""
     roi_copy = binary_roi.copy()
     contours, hierarchy = cv2.findContours(roi_copy, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     if hierarchy is None: return 0, None
@@ -73,25 +71,25 @@ def analyze_hole_geometry(binary_roi):
     largest_hole_y = valid_holes[0][1]
     return len(valid_holes), largest_hole_y
 
-def process_and_predict(image_bgr, min_area, min_density, show_debug=False):
+def process_and_predict(image_bgr, min_area, min_density, min_confidence, show_debug=False):
     result_img = image_bgr.copy()
     
-    # 1. 轉灰階 & 總亮度檢查
+    # 1. 轉灰階 & 亮度檢查
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     max_val = np.max(gray)
     if max_val < 50:
-        if show_debug: st.warning("⚠️ 畫面太暗，忽略處理")
+        if show_debug: st.warning("⚠️ 畫面太暗")
         return result_img, []
 
-    # 2. Otsu 二值化
+    # 2. 二值化
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     binary_proc = cv2.dilate(thresh, None, iterations=1)
     
     if show_debug:
-        st.image(binary_proc, caption="AI 看到的二值化影像", width=300)
+        st.image(binary_proc, caption="【Debug】二值化影像", width=300)
     
-    # 3. 連通域分析
+    # 3. 抓取物件
     nb, output, stats_cc, _ = cv2.connectedComponentsWithStats(binary_proc, connectivity=8)
     raw_boxes = sorted([stats_cc[i, :4] for i in range(1, nb) if stats_cc[i, cv2.CC_STAT_AREA] > min_area], key=lambda b: b[0])
 
@@ -126,7 +124,8 @@ def process_and_predict(image_bgr, min_area, min_density, show_debug=False):
             rois_to_pred.append(final_roi_norm)
             coords_to_draw.append((x + offset_x, y, sw, sh, sub_roi))
 
-    detected_numbers = []
+    detected_info = [] # 改成存詳細資料 (數字, 信心)
+
     if len(rois_to_pred) > 0:
         predictions = cnn_model.predict(np.array(rois_to_pred), verbose=0)
         
@@ -135,6 +134,12 @@ def process_and_predict(image_bgr, min_area, min_density, show_debug=False):
             confidence = np.max(pred_probs)
             rx, ry, w, h, roi_original = coords_to_draw[i]
             
+            # 信心過濾
+            if confidence < min_confidence:
+                if show_debug:
+                    cv2.rectangle(result_img, (rx, ry), (rx+w, ry+h), (0, 0, 255), 1)
+                continue
+
             display_text = str(res_id)
             color = (0, 255, 0)
             
@@ -148,18 +153,11 @@ def process_and_predict(image_bgr, min_area, min_density, show_debug=False):
                 if hole_y is not None and hole_y < 0.58: res_id, display_text, color = 0, "0*", (0, 255, 255)
             elif res_id == 8:
                 if num_holes == 1: res_id, display_text, color = 0, "0*", (0, 255, 255)
-            
             elif res_id == 2:
-                # [V31 修改] 
-                # 原本這裡有一行 code 會把太瘦的 2 強制變成 1
-                # 現在已經移除，讓它保持是 2
-                
-                # 保留對 7 的檢查 (如果 2 的底部太短，可能是 7)
                 h_r, w_r = roi_original.shape
                 pts = cv2.findNonZero(roi_original[int(h_r*0.7):, :])
                 if pts is not None and cv2.boundingRect(pts)[2] < w_r * 0.5:
                     res_id, display_text, color = 7, "7*", (0, 255, 255)
-            
             elif res_id == 7:
                 if aspect_ratio < 0.5 or density < 0.25: res_id, display_text, color = 1, "1*", (0, 255, 255)
             elif res_id == 4 or res_id == 9:
@@ -167,26 +165,39 @@ def process_and_predict(image_bgr, min_area, min_density, show_debug=False):
                 if res_id == 9 and not has_hole: res_id, display_text, color = 4, "4*", (0, 255, 255)
                 elif res_id == 4 and has_hole and confidence < 0.95: res_id, display_text, color = 9, "9*", (0, 255, 255)
             
-            detected_numbers.append(str(res_id))
-            cv2.rectangle(result_img, (rx, ry), (rx+w, ry+h), color, 2)
-            cv2.putText(result_img, display_text, (rx, ry-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+            # 格式化信心 (轉成 %)
+            conf_str = f"{int(confidence * 100)}%"
             
-    return result_img, detected_numbers
+            # 收集詳細資訊
+            detected_info.append({"數字": str(res_id), "信心度": conf_str, "修正": "*" in display_text})
+            
+            # [V33 修改] 畫圖時加上信心度
+            label = f"{display_text} ({conf_str})"
+            cv2.rectangle(result_img, (rx, ry), (rx+w, ry+h), color, 2)
+            # 字體縮小一點以免擠在一起
+            cv2.putText(result_img, label, (rx, ry-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+    return result_img, detected_info
 
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 多數字辨識系統 (V31 Tuned)")
+st.title("🔢 AI 手寫辨識 (含信心度分析)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
-show_debug = st.sidebar.checkbox("👁️ 顯示二值化影像 (Debug)", value=False)
+show_debug = st.sidebar.checkbox("👁️ 顯示二值化/忽略區域", value=False)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🎛️ 靈敏度 (可調整)")
+st.sidebar.subheader("🎛️ 靈敏度")
 stroke_width = st.sidebar.slider("筆刷粗細", 5, 30, 20)
 min_area = st.sidebar.slider("最小面積", 20, 500, 100)
 min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.10)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🤖 AI 信心門檻")
+st.sidebar.info("信心低於此數值的字會被忽略")
+min_confidence = st.sidebar.slider("信心過濾器 (Confidence)", 0.5, 1.0, 0.60) # 預設調低一點，讓你有機會看到信心較低的字
 
 if mode_option == "✍️ 手寫板":
     st.markdown("### 請在下方寫出一串數字")
@@ -209,24 +220,41 @@ if mode_option == "✍️ 手寫板":
             if canvas_result.image_data is not None:
                 img_data = canvas_result.image_data.astype(np.uint8)
                 img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGBA2BGR)
-                result_img, nums = process_and_predict(img_bgr, min_area, min_density, show_debug)
+                result_img, info_list = process_and_predict(img_bgr, min_area, min_density, min_confidence, show_debug)
                 
                 st.image(result_img, channels="BGR", use_container_width=True)
-                if nums:
-                    st.success("✅ 辨識成功！")
-                    st.metric(label="偵測結果", value=" ".join(nums))
+                
+                if info_list:
+                    st.success("✅ 辨識完成！")
+                    
+                    # 顯示純數字序列
+                    nums_str = " ".join([item["數字"] for item in info_list])
+                    st.metric(label="偵測結果", value=nums_str)
+                    
+                    # [V33 新增] 顯示詳細信心度表格
+                    st.markdown("##### 📊 詳細數據分析")
+                    df = pd.DataFrame(info_list)
+                    st.dataframe(df, use_container_width=True)
                 else:
-                    st.warning("⚠️ 未偵測到數字")
+                    st.warning("⚠️ 未偵測到數字 (或信心不足)")
 
 elif mode_option == "📷 拍照辨識":
     img_file = st.camera_input("拍照")
     if img_file:
         bytes_data = img_file.getvalue()
         cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-        result_img, nums = process_and_predict(cv2_img, min_area, min_density, show_debug)
+        result_img, info_list = process_and_predict(cv2_img, min_area, min_density, min_confidence, show_debug)
+        
         st.image(result_img, channels="BGR")
-        if nums: st.metric(label="偵測結果", value=" ".join(nums))
-        else: st.error("無法辨識")
+        if info_list:
+             nums_str = " ".join([item["數字"] for item in info_list])
+             st.metric(label="偵測結果", value=nums_str)
+             
+             # 顯示表格
+             st.markdown("##### 📊 詳細數據分析")
+             st.dataframe(pd.DataFrame(info_list), use_container_width=True)
+        else:
+             st.error("無法辨識 (信心不足)")
 
 elif mode_option == "📂 上傳圖片":
     uploaded_file = st.file_uploader("選擇圖片", type=["jpg", "png"])
@@ -236,7 +264,12 @@ elif mode_option == "📂 上傳圖片":
         if img_array.shape[-1] == 3: img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
         else: img_bgr = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
         st.image(img_array, caption="原始圖", width=300)
+        
         if st.button("辨識"):
-            result_img, nums = process_and_predict(img_bgr, min_area, min_density, show_debug)
+            result_img, info_list = process_and_predict(img_bgr, min_area, min_density, min_confidence, show_debug)
             st.image(result_img, channels="BGR")
-            if nums: st.metric(label="偵測結果", value=" ".join(nums))
+            if info_list:
+                nums_str = " ".join([item["數字"] for item in info_list])
+                st.metric(label="偵測結果", value=nums_str)
+                st.markdown("##### 📊 詳細數據分析")
+                st.dataframe(pd.DataFrame(info_list), use_container_width=True)
