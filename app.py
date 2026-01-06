@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V36 UI)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V37 Inspection)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -77,7 +77,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # V35 的影像處理模式選擇
+    # V35/V36 處理模式
     if proc_mode == "adaptive":
         binary_proc = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
     elif proc_mode == "manual":
@@ -94,19 +94,18 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
     binary_proc = cv2.dilate(binary_proc, None, iterations=1)
     
     if show_debug:
-        st.image(binary_proc, caption=f"【Debug】二值化影像 ({proc_mode})", width=300)
+        st.image(binary_proc, caption=f"【Debug】二值化影像", width=300)
     
     nb, output, stats_cc, _ = cv2.connectedComponentsWithStats(binary_proc, connectivity=8)
     raw_boxes = sorted([stats_cc[i, :4] for i in range(1, nb)], key=lambda b: b[0])
 
     rois_to_pred = []
     coords_to_draw = []
-    h_img, w_img = binary_proc.shape 
     detected_info = []
 
     for box in raw_boxes:
         x, y, w, h = box
-        if x < 5 or y < 5 or (x + w) > w_img - 5 or (y + h) > h_img - 5: continue
+        if x < 5 or y < 5 or (x + w) > binary_proc.shape[1] - 5 or (y + h) > binary_proc.shape[0] - 5: continue
         if h < 20: continue 
 
         split_results = split_touching_digits(binary_proc[y:y+h, x:x+w])
@@ -119,14 +118,12 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
             box_area = sw * sh
             density = n_white_pix / float(box_area)
 
+            # Debug 畫框
             if n_white_pix < min_area:
-                if show_debug:
-                    cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 255), 1)
+                if show_debug: cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 255), 1)
                 continue
-
             if density < min_density:
-                if show_debug:
-                    cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 0), 1)
+                if show_debug: cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 0), 1)
                 continue
             
             side = max(sw, sh)
@@ -177,12 +174,17 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
                 if res_id == 9 and not has_hole: res_id, display_text, color = 4, "4*", (0, 255, 255)
                 elif res_id == 4 and has_hole and confidence < 0.95: res_id, display_text, color = 9, "9*", (0, 255, 255)
             
-            # 這裡我們存 float 格式的 confidence，方便 UI 畫進度條
+            # [V37] 儲存切片圖片，為了在介面上顯示
+            # 必須把 roi_original (只有黑白) 轉成 RGB 格式方便顯示
+            roi_display = cv2.cvtColor(roi_original, cv2.COLOR_GRAY2RGB)
+            roi_display = cv2.bitwise_not(roi_display) # 反轉顏色變成白底黑字，比較好閱讀
+
             detected_info.append({
-                "數字": str(res_id), 
-                "信心數值": float(confidence), # 用來畫進度條
-                "信心顯示": f"{int(confidence*100)}%", # 用來顯示文字
-                "修正": "*" in display_text
+                "id": len(detected_info) + 1,
+                "digit": str(res_id), 
+                "confidence": float(confidence),
+                "is_corrected": "*" in display_text,
+                "roi_img": roi_display # 存下圖片
             })
             
             label = f"{display_text} ({int(confidence*100)}%)"
@@ -194,7 +196,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V36 UI美化版)")
+st.title("🔢 AI 手寫辨識 (V37 詳細檢測)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -211,10 +213,10 @@ proc_mode_sel = st.sidebar.radio(
     }[x],
     index=1 if mode_option != "✍️ 手寫板" else 0
 )
-
-manual_thresh = 127
 if proc_mode_sel == "manual":
     manual_thresh = st.sidebar.slider("二值化門檻", 0, 255, 127)
+else:
+    manual_thresh = 127
 
 show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
@@ -225,32 +227,47 @@ min_area = st.sidebar.slider("最小面積", 20, 500, 100)
 min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.10)
 min_confidence = st.sidebar.slider("信心過濾器", 0.5, 1.0, 0.60) 
 
-# 主畫面邏輯
 def run_app(source_image):
     result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, proc_mode_sel, manual_thresh, show_debug)
     
     st.image(result_img, channels="BGR", use_container_width=True)
     
     if info_list:
-        st.success("✅ 辨識完成！")
-        
-        # [V36] 漂亮的進度條顯示
-        st.markdown("### 📊 詳細分析")
-        
-        # 使用 columns 建立卡片式佈局
-        cols = st.columns(len(info_list))
-        
-        for i, item in enumerate(info_list):
-            with cols[i]:
-                # 顯示大大的數字
-                st.metric(label=f"第 {i+1} 個字", value=item["數字"], delta="邏輯修正" if item["修正"] else None)
+        st.success(f"✅ 成功辨識出 {len(info_list)} 個數字！")
+        st.markdown("---")
+        st.subheader("🔍 詳細檢測報告")
+
+        # [V37] 顯示詳細的清單列表
+        for item in info_list:
+            with st.container():
+                # 分成三欄：[編號/圖片] - [預測結果] - [進度條]
+                c1, c2, c3 = st.columns([1, 1, 3])
                 
-                # 顯示進度條
-                conf_val = item["信心數值"]
-                st.progress(conf_val)
+                with c1:
+                    st.caption(f"編號 #{item['id']}")
+                    # 顯示 AI 切下來的那個字的圖片
+                    st.image(item['roi_img'], width=60, clamp=True)
                 
-                # 顯示文字百分比
-                st.caption(f"信心度: {item['信心顯示']}")
+                with c2:
+                    # 顯示大大的數字
+                    st.metric("預測數字", item['digit'], delta="邏輯修正" if item['is_corrected'] else None)
+                
+                with c3:
+                    # 顯示進度條
+                    conf = item['confidence']
+                    st.markdown(f"**信心度: {int(conf*100)}%**")
+                    st.progress(conf)
+                    
+                    # 給一點文字評語
+                    if conf > 0.9:
+                        st.caption("🌟 信心十足")
+                    elif conf > 0.7:
+                        st.caption("✅ 還算確定")
+                    else:
+                        st.caption("⚠️ 有點猶豫，建議重寫")
+                
+                st.divider() # 分隔線
+
     else:
         st.warning("⚠️ 未偵測到數字，請調整模式或靈敏度。")
 
@@ -259,23 +276,4 @@ if mode_option == "✍️ 手寫板":
     col1, col2 = st.columns([2, 1])
     with col1:
         canvas_result = st_canvas(fill_color="rgba(255, 165, 0, 0.3)", stroke_width=stroke_width, stroke_color="#FFFFFF", background_color="#000000", height=300, width=600, drawing_mode="freedraw", key="canvas")
-    with col2:
-        if st.button("開始辨識", type="primary"):
-            if canvas_result.image_data is not None:
-                img_data = canvas_result.image_data.astype(np.uint8)
-                img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGBA2BGR)
-                run_app(img_bgr)
-
-elif mode_option in ["📷 拍照辨識", "📂 上傳圖片"]:
-    if mode_option == "📷 拍照辨識":
-        file = st.camera_input("拍照")
-    else:
-        file = st.file_uploader("選擇圖片", type=["jpg", "png"])
-        
-    if file:
-        bytes_data = file.getvalue()
-        cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-        if mode_option == "📂 上傳圖片": st.image(cv2_img, caption="原始圖", width=300, channels="BGR")
-        
-        if st.button("辨識") or mode_option == "📷 拍照辨識":
-            run_app(cv2_img)
+    with
