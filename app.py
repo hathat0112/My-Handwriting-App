@@ -276,4 +276,23 @@ if mode_option == "✍️ 手寫板":
     col1, col2 = st.columns([2, 1])
     with col1:
         canvas_result = st_canvas(fill_color="rgba(255, 165, 0, 0.3)", stroke_width=stroke_width, stroke_color="#FFFFFF", background_color="#000000", height=300, width=600, drawing_mode="freedraw", key="canvas")
-    with
+    with col2:
+        if st.button("開始辨識", type="primary"):
+            if canvas_result.image_data is not None:
+                img_data = canvas_result.image_data.astype(np.uint8)
+                img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGBA2BGR)
+                run_app(img_bgr)
+
+elif mode_option in ["📷 拍照辨識", "📂 上傳圖片"]:
+    if mode_option == "📷 拍照辨識":
+        file = st.camera_input("拍照")
+    else:
+        file = st.file_uploader("選擇圖片", type=["jpg", "png"])
+        
+    if file:
+        bytes_data = file.getvalue()
+        cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+        if mode_option == "📂 上傳圖片": st.image(cv2_img, caption="原始圖", width=300, channels="BGR")
+        
+        if st.button("辨識") or mode_option == "📷 拍照辨識":
+            run_app(cv2_img)
