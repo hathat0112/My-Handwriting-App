@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V45 Sensitivity)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V46 Guide)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -79,7 +79,6 @@ def apply_temperature_scaling(probs, temperature=1.0):
     new_probs = exp_logits / np.sum(exp_logits)
     return new_probs
 
-# [V45] 新增 dilation_iter 和 use_morph_close 參數
 def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, use_smart_logic, temperature, dilation_iter, use_morph_close, show_debug):
     result_img = image_bgr.copy()
     h_img_full, w_img_full = result_img.shape[:2]
@@ -100,13 +99,10 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         _, thresh = cv2.threshold(blur, 0, 255, flag)
         binary_proc = thresh
 
-    # [V45] 強力修補邏輯
-    # 1. 斷筆修補 (Morphology Closing): 先膨脹再侵蝕，把斷掉的線接起來
     if use_morph_close:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         binary_proc = cv2.morphologyEx(binary_proc, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-    # 2. 筆畫加粗 (Dilation): 根據使用者設定的次數膨脹
     if dilation_iter > 0:
         binary_proc = cv2.dilate(binary_proc, None, iterations=dilation_iter)
     
@@ -122,9 +118,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 
     for box in raw_boxes:
         x, y, w, h = box
-        # 放寬邊界檢查：只要不是真的黏在邊框上，都讓它通過
         if x <= 1 or y <= 1 or (x + w) >= binary_proc.shape[1] - 1 or (y + h) >= binary_proc.shape[0] - 1: continue
-        # 放寬高度檢查
         if h < 10: continue 
 
         split_results = split_touching_digits(binary_proc[y:y+h, x:x+w])
@@ -137,14 +131,11 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             box_area = sw * sh
             density = n_white_pix / float(box_area)
 
-            # Debug: 顯示被過濾的原因
             if n_white_pix < min_area:
-                if show_debug: 
-                    cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 255), 1)
+                if show_debug: cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 255), 1)
                 continue
             if density < min_density:
-                if show_debug: 
-                    cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 0), 1)
+                if show_debug: cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 0), 1)
                 continue
             
             side = max(sw, sh)
@@ -226,7 +217,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V45 Sensitivity)")
+st.title("🔢 AI 手寫辨識 (V46 Guide)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -241,31 +232,50 @@ proc_mode_sel = st.sidebar.radio(
         "adaptive": "📄 拍照模式 (抗陰影)",
         "manual": "🎚️ 手動門檻"
     }[x],
-    index=1 if mode_option != "✍️ 手寫板" else 0
+    index=1 if mode_option != "✍️ 手寫板" else 0,
+    help="Otsu: 電腦生成的圖片用。Adaptive: 手機拍紙張用。"
 )
 if proc_mode_sel == "manual":
-    manual_thresh = st.sidebar.slider("二值化門檻", 0, 255, 127)
+    manual_thresh = st.sidebar.slider("二值化門檻", 0, 255, 127, help="越低越黑，越高越白")
 else:
     manual_thresh = 127
 
-# [V45 新增] 影像增強參數
-box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10)
-dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 1, help="如果字太細或斷斷續續，請調大這個數值")
-use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補 (Closing)", value=True, help="自動連接斷掉的筆劃")
+box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10, help="把綠色框框往外擴大，避免切到字的邊緣")
+dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 1, help="讓筆劃變粗，幫助 AI 看到太細的字")
+use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True, help="自動把斷掉的筆劃連起來")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 辨識邏輯")
-use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正 (Smart Logic)", value=True)
-temperature = st.sidebar.slider("🌡️ 信心溫度", 1.0, 5.0, 1.0, 0.1)
-min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
+use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正", value=True, help="如果 AI 把 7 判成 1，嘗試關閉此選項")
+temperature = st.sidebar.slider("🌡️ 信心溫度", 1.0, 5.0, 1.0, 0.1, help="數值越高，AI 越謙虛 (信心度會下降)")
+min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40, help="信心低於此分數的字會被當作雜訊丟掉") 
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎛️ 靈敏度")
-# [V45] 預設值調低至 50
-min_area = st.sidebar.slider("最小面積 (過濾雜訊)", 10, 500, 50, help="太小的點會被當作雜訊過濾掉。如果數字不見了，試著調小這個。")
-min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
-show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
+min_area = st.sidebar.slider("最小面積 (過濾雜訊)", 10, 500, 50, help="太小的點(灰塵)會被過濾掉。如果字不見了，調小這個。")
+min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05, help="如果框框裡太空(例如只有一個小點)，會被過濾掉")
+show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False, help="勾選後會顯示 AI 看到的黑白畫面，紅色/紫色框代表被過濾掉的東西")
 
+# [V46 新增] 說明書 Expander
+with st.sidebar.expander("📖 參數新手指南 (點我展開)"):
+    st.markdown("""
+    ### 🏭 如何調整參數？
+    
+    **1. 字不見了？**
+    * 調低 `最小面積` (可能字太小被掃掉了)
+    * 調高 `筆畫膨脹` (可能字太細)
+    * 勾選 `斷筆修補` (可能字斷成兩半)
+    
+    **2. 很多雜訊框框？**
+    * 調高 `最小面積` (把灰塵濾掉)
+    * 調高 `信心過濾器` (把 AI 看不懂的濾掉)
+    
+    **3. 拍照有陰影？**
+    * 影像處理模式選 `📄 拍照模式`
+    
+    **4. 信心度都是 100%？**
+    * 調高 `信心溫度`，讓 AI 變誠實一點
+    """)
 
 def run_app(source_image):
     result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, use_smart_logic, temperature, dilation_iter, use_morph_close, show_debug)
