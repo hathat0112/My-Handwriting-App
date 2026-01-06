@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V39 Clean)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V40 Logic Switch)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -71,7 +71,7 @@ def analyze_hole_geometry(binary_roi):
     largest_hole_y = valid_holes[0][1]
     return len(valid_holes), largest_hole_y
 
-def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_mode="adaptive", manual_thresh=127, show_debug=False):
+def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_mode="adaptive", manual_thresh=127, use_smart_logic=True, show_debug=False):
     result_img = image_bgr.copy()
     
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
@@ -151,26 +151,32 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
             display_text = str(res_id)
             color = (0, 255, 0)
             
-            num_holes, hole_y = analyze_hole_geometry(roi_original)
-            aspect_ratio = w / float(h)
-            pixel_count = cv2.countNonZero(roi_original)
-            density = pixel_count / float(w * h)
+            # [V40] 這裡加入判斷，只有當開關打開時，才執行修正邏輯
+            is_corrected = False
+            if use_smart_logic:
+                num_holes, hole_y = analyze_hole_geometry(roi_original)
+                aspect_ratio = w / float(h)
+                pixel_count = cv2.countNonZero(roi_original)
+                density = pixel_count / float(w * h)
 
-            if res_id == 6:
-                if hole_y is not None and hole_y < 0.58: res_id, display_text, color = 0, "0*", (0, 255, 255)
-            elif res_id == 8:
-                if num_holes == 1: res_id, display_text, color = 0, "0*", (0, 255, 255)
-            elif res_id == 2:
-                h_r, w_r = roi_original.shape
-                pts = cv2.findNonZero(roi_original[int(h_r*0.7):, :])
-                if pts is not None and cv2.boundingRect(pts)[2] < w_r * 0.5:
-                    res_id, display_text, color = 7, "7*", (0, 255, 255)
-            elif res_id == 7:
-                if aspect_ratio < 0.5 or density < 0.25: res_id, display_text, color = 1, "1*", (0, 255, 255)
-            elif res_id == 4 or res_id == 9:
-                has_hole = (num_holes > 0)
-                if res_id == 9 and not has_hole: res_id, display_text, color = 4, "4*", (0, 255, 255)
-                elif res_id == 4 and has_hole and confidence < 0.95: res_id, display_text, color = 9, "9*", (0, 255, 255)
+                if res_id == 6:
+                    if hole_y is not None and hole_y < 0.58: res_id, display_text, color = 0, "0*", (0, 255, 255)
+                elif res_id == 8:
+                    if num_holes == 1: res_id, display_text, color = 0, "0*", (0, 255, 255)
+                elif res_id == 2:
+                    h_r, w_r = roi_original.shape
+                    pts = cv2.findNonZero(roi_original[int(h_r*0.7):, :])
+                    if pts is not None and cv2.boundingRect(pts)[2] < w_r * 0.5:
+                        res_id, display_text, color = 7, "7*", (0, 255, 255)
+                elif res_id == 7:
+                    if aspect_ratio < 0.5 or density < 0.25: res_id, display_text, color = 1, "1*", (0, 255, 255)
+                elif res_id == 4 or res_id == 9:
+                    has_hole = (num_holes > 0)
+                    if res_id == 9 and not has_hole: res_id, display_text, color = 4, "4*", (0, 255, 255)
+                    elif res_id == 4 and has_hole and confidence < 0.95: res_id, display_text, color = 9, "9*", (0, 255, 255)
+                
+                if "*" in display_text:
+                    is_corrected = True
             
             roi_display = cv2.cvtColor(roi_original, cv2.COLOR_GRAY2RGB)
             roi_display = cv2.bitwise_not(roi_display)
@@ -181,13 +187,12 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
                 "id": current_id,
                 "digit": str(res_id), 
                 "confidence": float(confidence),
-                "is_corrected": "*" in display_text,
+                "is_corrected": is_corrected,
                 "roi_img": roi_display
             })
             
-            # [V39 修改] 圖片上只顯示編號，不顯示結果與信心
+            # 圖片上只顯示編號
             label = f"#{current_id}"
-            
             cv2.rectangle(result_img, (rx, ry), (rx+w, ry+h), color, 2)
             cv2.putText(result_img, label, (rx, ry-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
@@ -196,19 +201,19 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V39 Clean)")
+st.title("🔢 AI 手寫辨識 (V40 Logic Switch)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🖼️ 影像處理模式")
+st.sidebar.subheader("🖼️ 影像處理")
 proc_mode_sel = st.sidebar.radio(
     "選擇演算法",
     ("otsu", "adaptive", "manual"),
     format_func=lambda x: {
-        "otsu": "標準模式 (適合純黑手寫板)",
-        "adaptive": "📄 紙張/拍照模式 (抗陰影)",
+        "otsu": "標準模式 (純黑背景)",
+        "adaptive": "📄 拍照模式 (抗陰影)",
         "manual": "🎚️ 手動門檻"
     }[x],
     index=1 if mode_option != "✍️ 手寫板" else 0
@@ -218,17 +223,21 @@ if proc_mode_sel == "manual":
 else:
     manual_thresh = 127
 
-show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
+st.sidebar.markdown("---")
+st.sidebar.subheader("🤖 辨識邏輯")
+# [V40 新增] 邏輯修正開關
+use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正 (Smart Logic)", value=True, help="取消勾選以使用純 AI 預測，不進行人工規則修正(如2轉7)。")
+min_confidence = st.sidebar.slider("信心過濾器", 0.5, 1.0, 0.60) 
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎛️ 靈敏度")
-stroke_width = st.sidebar.slider("筆刷粗細", 5, 30, 20)
 min_area = st.sidebar.slider("最小面積", 20, 500, 100)
 min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.10)
-min_confidence = st.sidebar.slider("信心過濾器", 0.5, 1.0, 0.60) 
+show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
+
 
 def run_app(source_image):
-    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, proc_mode_sel, manual_thresh, show_debug)
+    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, proc_mode_sel, manual_thresh, use_smart_logic, show_debug)
     
     st.image(result_img, channels="BGR", use_container_width=True)
     
@@ -246,7 +255,7 @@ def run_app(source_image):
                     st.image(item['roi_img'], width=60, clamp=True)
                 
                 with c2:
-                    st.metric("預測數字", item['digit'], delta="邏輯修正" if item['is_corrected'] else None)
+                    st.metric("預測數字", item['digit'], delta="規則介入" if item['is_corrected'] else "AI 原生")
                 
                 with c3:
                     conf = item['confidence']
@@ -266,7 +275,7 @@ def run_app(source_image):
 if mode_option == "✍️ 手寫板":
     col1, col2 = st.columns([2, 1])
     with col1:
-        canvas_result = st_canvas(fill_color="rgba(255, 165, 0, 0.3)", stroke_width=stroke_width, stroke_color="#FFFFFF", background_color="#000000", height=300, width=600, drawing_mode="freedraw", key="canvas")
+        canvas_result = st_canvas(fill_color="rgba(255, 165, 0, 0.3)", stroke_width=20, stroke_color="#FFFFFF", background_color="#000000", height=300, width=600, drawing_mode="freedraw", key="canvas")
     with col2:
         if st.button("開始辨識", type="primary"):
             if canvas_result.image_data is not None:
