@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V35 Photo)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V36 UI)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -72,52 +72,30 @@ def analyze_hole_geometry(binary_roi):
     return len(valid_holes), largest_hole_y
 
 def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_mode="adaptive", manual_thresh=127, show_debug=False):
-    """
-    V35 更新：加入 proc_mode (處理模式)
-    - 'otsu': 傳統模式 (適合手寫板)
-    - 'adaptive': 適應性模式 (適合拍照、有陰影的紙張)
-    - 'manual': 手動調整門檻
-    """
     result_img = image_bgr.copy()
     
-    # 1. 轉灰階
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    
-    # 模糊降噪
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # 2. 二值化 (根據模式選擇演算法)
+    # V35 的影像處理模式選擇
     if proc_mode == "adaptive":
-        # [強效模式] 針對紙張拍照 (Block Size=19, C=10)
-        # THRESH_BINARY_INV 會自動把 黑字(低數值) 轉成 白字(高數值)
         binary_proc = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
-        
     elif proc_mode == "manual":
-        # [手動模式] 使用者自己拉滑桿
         _, thresh = cv2.threshold(blur, manual_thresh, 255, cv2.THRESH_BINARY_INV)
         binary_proc = thresh
-        
-    else: # "otsu" (預設)
-        # [原本的模式] 適合全黑背景的手寫板
-        # 注意：如果是白紙黑字，這裡需要用 THRESH_BINARY_INV
-        # 為了兼容手寫板(黑底白字)和白紙(白底黑字)，我們先判斷背景顏色
-        
-        # 簡單判斷：如果圖片平均亮度 > 127，代表是白紙(亮背景)，要反轉
+    else: # "otsu"
         if np.mean(gray) > 127:
             flag = cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
         else:
             flag = cv2.THRESH_BINARY + cv2.THRESH_OTSU
-            
         _, thresh = cv2.threshold(blur, 0, 255, flag)
         binary_proc = thresh
 
-    # 膨脹一點點，讓斷字連起來
     binary_proc = cv2.dilate(binary_proc, None, iterations=1)
     
     if show_debug:
         st.image(binary_proc, caption=f"【Debug】二值化影像 ({proc_mode})", width=300)
     
-    # 3. 抓取物件
     nb, output, stats_cc, _ = cv2.connectedComponentsWithStats(binary_proc, connectivity=8)
     raw_boxes = sorted([stats_cc[i, :4] for i in range(1, nb)], key=lambda b: b[0])
 
@@ -141,17 +119,14 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
             box_area = sw * sh
             density = n_white_pix / float(box_area)
 
-            # Debug 框框
             if n_white_pix < min_area:
                 if show_debug:
                     cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 255), 1)
-                    cv2.putText(result_img, "Small", (x+offset_x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
                 continue
 
             if density < min_density:
                 if show_debug:
                     cv2.rectangle(result_img, (x+offset_x, y), (x+offset_x+sw, y+sh), (255, 0, 0), 1)
-                    cv2.putText(result_img, "Noise", (x+offset_x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
                 continue
             
             side = max(sw, sh)
@@ -176,8 +151,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
             if confidence < min_confidence:
                 if show_debug:
                     cv2.rectangle(result_img, (rx, ry), (rx+w, ry+h), (0, 0, 255), 1)
-                    label = f"{res_id}? ({int(confidence*100)}%)"
-                    cv2.putText(result_img, label, (rx, ry-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
                 continue
 
             display_text = str(res_id)
@@ -204,10 +177,15 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
                 if res_id == 9 and not has_hole: res_id, display_text, color = 4, "4*", (0, 255, 255)
                 elif res_id == 4 and has_hole and confidence < 0.95: res_id, display_text, color = 9, "9*", (0, 255, 255)
             
-            conf_str = f"{int(confidence * 100)}%"
-            detected_info.append({"數字": str(res_id), "信心度": conf_str, "修正": "*" in display_text})
+            # 這裡我們存 float 格式的 confidence，方便 UI 畫進度條
+            detected_info.append({
+                "數字": str(res_id), 
+                "信心數值": float(confidence), # 用來畫進度條
+                "信心顯示": f"{int(confidence*100)}%", # 用來顯示文字
+                "修正": "*" in display_text
+            })
             
-            label = f"{display_text} ({conf_str})"
+            label = f"{display_text} ({int(confidence*100)}%)"
             cv2.rectangle(result_img, (rx, ry), (rx+w, ry+h), color, 2)
             cv2.putText(result_img, label, (rx, ry-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
@@ -216,30 +194,29 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V35 Photo)")
+st.title("🔢 AI 手寫辨識 (V36 UI美化版)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
 
-# [V35 新增] 影像處理模式選單
 st.sidebar.markdown("---")
-st.sidebar.subheader("🖼️ 影像處理模式 (重要!)")
+st.sidebar.subheader("🖼️ 影像處理模式")
 proc_mode_sel = st.sidebar.radio(
     "選擇演算法",
     ("otsu", "adaptive", "manual"),
     format_func=lambda x: {
         "otsu": "標準模式 (適合純黑手寫板)",
         "adaptive": "📄 紙張/拍照模式 (抗陰影)",
-        "manual": "🎚️ 手動門檻 (自己調亮度)"
+        "manual": "🎚️ 手動門檻"
     }[x],
-    index=1 # 預設選 adaptive，因為你正在測試拍照
+    index=1 if mode_option != "✍️ 手寫板" else 0
 )
 
 manual_thresh = 127
 if proc_mode_sel == "manual":
-    manual_thresh = st.sidebar.slider("二值化門檻 (越小越白)", 0, 255, 127)
+    manual_thresh = st.sidebar.slider("二值化門檻", 0, 255, 127)
 
-show_debug = st.sidebar.checkbox("👁️ 顯示二值化/忽略區域 (Debug)", value=True) # 預設開啟
+show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎛️ 靈敏度")
@@ -248,7 +225,36 @@ min_area = st.sidebar.slider("最小面積", 20, 500, 100)
 min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.10)
 min_confidence = st.sidebar.slider("信心過濾器", 0.5, 1.0, 0.60) 
 
-# 主邏輯
+# 主畫面邏輯
+def run_app(source_image):
+    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, proc_mode_sel, manual_thresh, show_debug)
+    
+    st.image(result_img, channels="BGR", use_container_width=True)
+    
+    if info_list:
+        st.success("✅ 辨識完成！")
+        
+        # [V36] 漂亮的進度條顯示
+        st.markdown("### 📊 詳細分析")
+        
+        # 使用 columns 建立卡片式佈局
+        cols = st.columns(len(info_list))
+        
+        for i, item in enumerate(info_list):
+            with cols[i]:
+                # 顯示大大的數字
+                st.metric(label=f"第 {i+1} 個字", value=item["數字"], delta="邏輯修正" if item["修正"] else None)
+                
+                # 顯示進度條
+                conf_val = item["信心數值"]
+                st.progress(conf_val)
+                
+                # 顯示文字百分比
+                st.caption(f"信心度: {item['信心顯示']}")
+    else:
+        st.warning("⚠️ 未偵測到數字，請調整模式或靈敏度。")
+
+# 介面渲染
 if mode_option == "✍️ 手寫板":
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -258,12 +264,7 @@ if mode_option == "✍️ 手寫板":
             if canvas_result.image_data is not None:
                 img_data = canvas_result.image_data.astype(np.uint8)
                 img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGBA2BGR)
-                # 強制手寫板用 otsu
-                result_img, info_list = process_and_predict(img_bgr, min_area, min_density, min_confidence, "otsu", manual_thresh, show_debug)
-                st.image(result_img, channels="BGR", use_container_width=True)
-                if info_list:
-                    st.metric(label="結果", value=" ".join([item["數字"] for item in info_list]))
-                    st.dataframe(pd.DataFrame(info_list), use_container_width=True)
+                run_app(img_bgr)
 
 elif mode_option in ["📷 拍照辨識", "📂 上傳圖片"]:
     if mode_option == "📷 拍照辨識":
@@ -274,16 +275,7 @@ elif mode_option in ["📷 拍照辨識", "📂 上傳圖片"]:
     if file:
         bytes_data = file.getvalue()
         cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+        if mode_option == "📂 上傳圖片": st.image(cv2_img, caption="原始圖", width=300, channels="BGR")
         
-        if mode_option == "📂 上傳圖片":
-             st.image(cv2_img, caption="原始圖", width=300, channels="BGR")
-             
-        # 這裡傳入使用者選擇的 proc_mode
         if st.button("辨識") or mode_option == "📷 拍照辨識":
-            result_img, info_list = process_and_predict(cv2_img, min_area, min_density, min_confidence, proc_mode_sel, manual_thresh, show_debug)
-            st.image(result_img, channels="BGR")
-            if info_list:
-                st.metric(label="結果", value=" ".join([item["數字"] for item in info_list]))
-                st.dataframe(pd.DataFrame(info_list), use_container_width=True)
-            else:
-                st.error("未偵測到數字。請嘗試切換「影像處理模式」或調整「二值化門檻」。")
+            run_app(cv2_img)
