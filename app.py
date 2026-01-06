@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V38 ID Display)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V39 Clean)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -175,7 +175,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
             roi_display = cv2.cvtColor(roi_original, cv2.COLOR_GRAY2RGB)
             roi_display = cv2.bitwise_not(roi_display)
 
-            # 取得目前的編號
             current_id = len(detected_info) + 1
 
             detected_info.append({
@@ -186,9 +185,8 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
                 "roi_img": roi_display
             })
             
-            # [V38 修改] 把編號加到圖片上的標籤裡
-            # 顯示格式： #1: 2 (99%)
-            label = f"#{current_id}: {display_text} ({int(confidence*100)}%)"
+            # [V39 修改] 圖片上只顯示編號，不顯示結果與信心
+            label = f"#{current_id}"
             
             cv2.rectangle(result_img, (rx, ry), (rx+w, ry+h), color, 2)
             cv2.putText(result_img, label, (rx, ry-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -198,7 +196,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, proc_m
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V38 編號對照)")
+st.title("🔢 AI 手寫辨識 (V39 Clean)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -241,11 +239,9 @@ def run_app(source_image):
 
         for item in info_list:
             with st.container():
-                # 分成三欄：[編號/圖片] - [預測結果] - [進度條]
                 c1, c2, c3 = st.columns([1, 1, 3])
                 
                 with c1:
-                    # 這裡的編號會跟圖片上的 #1, #2 對應
                     st.metric(label="編號", value=f"#{item['id']}")
                     st.image(item['roi_img'], width=60, clamp=True)
                 
