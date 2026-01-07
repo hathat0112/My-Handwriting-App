@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V50 Lite)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V51 Pure)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -51,29 +51,9 @@ def split_touching_digits(roi_binary):
     if part1.shape[1] < 5 or part2.shape[1] < 5: return [(0, roi_binary)]
     return [(0, part1), (split_x, part2)]
 
-def analyze_hole_geometry(binary_roi):
-    roi_copy = binary_roi.copy()
-    contours, hierarchy = cv2.findContours(roi_copy, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    if hierarchy is None: return 0, None
-    valid_holes = []
-    h_img, w_img = roi_copy.shape
-    for i in range(len(contours)):
-        if hierarchy[0][i][3] != -1: 
-            area = cv2.contourArea(contours[i])
-            if area > 15: 
-                M = cv2.moments(contours[i])
-                if M['m00'] != 0:
-                    cy = int(M['m01'] / M['m00'])
-                    norm_y = cy / float(h_img)
-                    valid_holes.append((area, norm_y))
-    if not valid_holes: return 0, None
-    valid_holes.sort(key=lambda x: x[0], reverse=True)
-    largest_hole_y = valid_holes[0][1]
-    return len(valid_holes), largest_hole_y
+# [V51] 移除了 analyze_hole_geometry (幾何分析) 函式，因為不再需要人工規則
 
-# [V50] 移除了 apply_temperature_scaling 函數
-
-def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, use_smart_logic, dilation_iter, use_morph_close, show_debug):
+def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, use_morph_close, show_debug):
     result_img = image_bgr.copy()
     h_img_full, w_img_full = result_img.shape[:2]
     
@@ -145,7 +125,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         predictions = cnn_model.predict(np.array(rois_to_pred), verbose=0)
         
         for i, pred_probs in enumerate(predictions):
-            # [V50] 移除溫度校準，直接使用原始預測機率
             res_id = np.argmax(pred_probs)
             confidence = np.max(pred_probs)
             rx, ry, w, h, roi_original = coords_to_draw[i]
@@ -156,23 +135,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             display_text = str(res_id)
             color = (0, 255, 0)
             
-            is_corrected = False
-            if use_smart_logic:
-                num_holes, hole_y = analyze_hole_geometry(roi_original)
-                if res_id == 6:
-                    if hole_y is not None and hole_y < 0.58: res_id, display_text, color = 0, "0*", (0, 255, 255)
-                elif res_id == 2:
-                    h_r, w_r = roi_original.shape
-                    pts = cv2.findNonZero(roi_original[int(h_r*0.7):, :])
-                    if pts is not None and cv2.boundingRect(pts)[2] < w_r * 0.5:
-                        res_id, display_text, color = 7, "7*", (0, 255, 255)
-                elif res_id == 4 or res_id == 9:
-                    has_hole = (num_holes > 0)
-                    if res_id == 9 and not has_hole: res_id, display_text, color = 4, "4*", (0, 255, 255)
-                    elif res_id == 4 and has_hole and confidence < 0.95: res_id, display_text, color = 9, "9*", (0, 255, 255)
-                
-                if "*" in display_text:
-                    is_corrected = True
+            # [V51] 移除了所有 use_smart_logic 相關的修正代碼
             
             roi_display = cv2.cvtColor(roi_original, cv2.COLOR_GRAY2RGB)
             roi_display = cv2.bitwise_not(roi_display)
@@ -183,7 +146,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
                 "id": current_id,
                 "digit": str(res_id), 
                 "confidence": float(confidence),
-                "is_corrected": is_corrected,
                 "roi_img": roi_display
             })
             
@@ -203,7 +165,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V50 Lite)")
+st.title("🔢 AI 手寫辨識 (V51 Pure)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -230,9 +192,8 @@ dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 2, help="�
 use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True, help="自動把斷掉的筆劃連起來")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🤖 辨識邏輯")
-use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正", value=True)
-# [V50 修改] 移除了信心溫度滑桿
+st.sidebar.subheader("🤖 辨識設定")
+# [V51] 移除了「啟用規則修正」與「信心溫度」
 min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
 
 st.sidebar.markdown("---")
@@ -242,7 +203,8 @@ min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
 show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
 def run_app(source_image):
-    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, use_smart_logic, dilation_iter, use_morph_close, show_debug)
+    # 移除 use_smart_logic 和 temperature 參數
+    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, dilation_iter, use_morph_close, show_debug)
     
     c1, c2 = st.columns([3, 2])
     
@@ -260,6 +222,7 @@ def run_app(source_image):
                         st.caption(f"#{item['id']}")
                         st.image(item['roi_img'], width=50)
                     with cols[1]:
+                        # 移除「邏輯修正」的 delta 顯示
                         st.metric("數字", item['digit'])
                     with cols[2]:
                         conf = item['confidence']
