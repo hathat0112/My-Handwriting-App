@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V49 Guide)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V50 Lite)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -71,15 +71,9 @@ def analyze_hole_geometry(binary_roi):
     largest_hole_y = valid_holes[0][1]
     return len(valid_holes), largest_hole_y
 
-def apply_temperature_scaling(probs, temperature=1.0):
-    probs = np.clip(probs, 1e-9, 1.0)
-    logits = np.log(probs)
-    scaled_logits = logits / temperature
-    exp_logits = np.exp(scaled_logits - np.max(scaled_logits))
-    new_probs = exp_logits / np.sum(exp_logits)
-    return new_probs
+# [V50] 移除了 apply_temperature_scaling 函數
 
-def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, use_smart_logic, temperature, dilation_iter, use_morph_close, show_debug):
+def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, use_smart_logic, dilation_iter, use_morph_close, show_debug):
     result_img = image_bgr.copy()
     h_img_full, w_img_full = result_img.shape[:2]
     
@@ -148,16 +142,12 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             coords_to_draw.append((x + offset_x, y, sw, sh, sub_roi))
 
     if len(rois_to_pred) > 0:
-        raw_predictions = cnn_model.predict(np.array(rois_to_pred), verbose=0)
+        predictions = cnn_model.predict(np.array(rois_to_pred), verbose=0)
         
-        for i, pred_probs in enumerate(raw_predictions):
-            if temperature != 1.0:
-                final_probs = apply_temperature_scaling(pred_probs, temperature)
-            else:
-                final_probs = pred_probs
-
-            res_id = np.argmax(final_probs)
-            confidence = np.max(final_probs)
+        for i, pred_probs in enumerate(predictions):
+            # [V50] 移除溫度校準，直接使用原始預測機率
+            res_id = np.argmax(pred_probs)
+            confidence = np.max(pred_probs)
             rx, ry, w, h, roi_original = coords_to_draw[i]
             
             if confidence < min_confidence:
@@ -213,7 +203,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V49 Smart Guide)")
+st.title("🔢 AI 手寫辨識 (V50 Lite)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -236,26 +226,23 @@ else:
     manual_thresh = 127
 
 box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10, help="如果覺得綠色框框太貼，可以調大這個")
-
-# [V49 修改] 增加白話文說明
 dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 2, help="【重要】如果字寫太細或斷斷續續，請把這個調大！")
 use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True, help="自動把斷掉的筆劃連起來")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 辨識邏輯")
 use_smart_logic = st.sidebar.checkbox("🧠 啟用規則修正", value=True)
-temperature = st.sidebar.slider("🌡️ 信心溫度", 1.0, 5.0, 1.0, 0.1)
+# [V50 修改] 移除了信心溫度滑桿
 min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎛️ 靈敏度 (重要)")
-# [V49 修改] 說明更直白，預設值設為更安全的 50
 min_area = st.sidebar.slider("最小面積 (數字不見調這裡)", 10, 500, 50, help="【最重要】如果你寫的字不見了，請把這個數值「往左拉」！如果雜訊太多，請「往右拉」。")
 min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
 show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
 def run_app(source_image):
-    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, use_smart_logic, temperature, dilation_iter, use_morph_close, show_debug)
+    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, use_smart_logic, dilation_iter, use_morph_close, show_debug)
     
     c1, c2 = st.columns([3, 2])
     
@@ -280,9 +267,7 @@ def run_app(source_image):
                         st.progress(conf)
                     st.divider()
         else:
-            # [V49] 智慧偵測：如果完全沒抓到字，跳出黃色警語教使用者怎麼做
             st.warning("⚠️ 畫面中未發現數字！")
-            
             st.info("""
             **💡 小撇步：如何找回消失的字？**
             
