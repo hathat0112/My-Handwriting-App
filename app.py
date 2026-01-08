@@ -11,7 +11,7 @@ import math
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V58 Solidity)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V60 Stats)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -120,29 +120,23 @@ def update_tracker(current_boxes_coords):
     st.session_state.tracker['next_id'] = next_id
     return final_ids_for_boxes
 
-# [V58] 新增：扎實度 (Solidity) 與 凸包檢查
 def is_valid_digit_shape(roi_binary, show_debug_info=False):
     contours, hierarchy = cv2.findContours(roi_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     if not contours: return False
     
-    # 找出最大的輪廓
     c = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(c)
     
-    if area < 10: return False # 太小
+    if area < 10: return False 
     
-    # 1. 扎實度檢查 (Solidity)
     hull = cv2.convexHull(c)
     hull_area = cv2.contourArea(hull)
     if hull_area == 0: return False
     solidity = float(area) / hull_area
     
-    # 中文字的筆劃通常很散，Solidity 會很低
-    # 數字通常比較飽滿，Solidity 較高 (除了 1 和 7 可能較低，但通常也在 0.25 以上)
     if solidity < 0.25: 
         return False 
 
-    # 2. 破洞檢查
     holes = 0
     if hierarchy is not None:
         for h in hierarchy[0]:
@@ -150,7 +144,6 @@ def is_valid_digit_shape(roi_binary, show_debug_info=False):
                 holes += 1
     if holes > 2: return False 
 
-    # 3. 線條複雜度 (Crossing Number)
     h, w = roi_binary.shape
     check_rows = [int(h*0.25), int(h*0.5), int(h*0.75)]
     for r in check_rows:
@@ -176,7 +169,39 @@ def is_valid_digit_shape(roi_binary, show_debug_info=False):
 
     return True
 
-def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, use_morph_close, merge_dist, use_tracking, use_strict_filter, show_debug):
+def clear_border_objects(binary_img, margin=5):
+    h, w = binary_img.shape
+    mask = np.zeros((h+2, w+2), np.uint8)
+    cv2.floodFill(binary_img, mask, (int(w/2), 0), 0)
+    cv2.floodFill(binary_img, mask, (int(w/2), h-1), 0)
+    cv2.floodFill(binary_img, mask, (0, int(h/2)), 0)
+    cv2.floodFill(binary_img, mask, (w-1, int(h/2)), 0)
+    cv2.rectangle(binary_img, (0, 0), (w, margin), 0, -1)
+    cv2.rectangle(binary_img, (0, h-margin), (w, h), 0, -1)
+    cv2.rectangle(binary_img, (0, 0), (margin, h), 0, -1)
+    cv2.rectangle(binary_img, (w-margin, 0), (w, h), 0, -1)
+    return binary_img
+
+# [V60] 新增：一致性過濾 與 Top-K
+def filter_by_consistency(boxes, use_consistency):
+    if not use_consistency or len(boxes) < 3:
+        return boxes
+    
+    # 計算面積中位數
+    areas = [b[2] * b[3] for b in boxes]
+    median_area = np.median(areas)
+    
+    # 保留那些面積在 0.5倍 ~ 2.5倍 中位數之間的框框
+    # 這樣可以濾掉特別大的(大標題)和特別小的(字幕)
+    filtered_boxes = []
+    for i, box in enumerate(boxes):
+        area = areas[i]
+        if area > median_area * 0.2 and area < median_area * 3.0:
+            filtered_boxes.append(box)
+            
+    return filtered_boxes
+
+def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, use_morph_close, merge_dist, use_tracking, use_strict_filter, use_consistency, top_k, show_debug):
     result_img = image_bgr.copy()
     h_img_full, w_img_full = result_img.shape[:2]
     
@@ -196,6 +221,11 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         _, thresh = cv2.threshold(blur, 0, 255, flag)
         binary_proc = thresh
 
+    if use_strict_filter:
+        margin_x = int(w_img_full * 0.05)
+        margin_y = int(h_img_full * 0.05)
+        binary_proc = clear_border_objects(binary_proc, margin=min(margin_x, margin_y, 20))
+
     if use_morph_close:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         binary_proc = cv2.morphologyEx(binary_proc, cv2.MORPH_CLOSE, kernel, iterations=1)
@@ -212,12 +242,9 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
     for i in range(1, nb):
         x, y, w, h = stats_cc[i, :4]
         
-        # [V58] 邊界過濾 (Border Check)
-        # 如果框框貼到圖片的最邊緣 (誤差 2 pixel)，很有可能是切割雜訊或滿版文字，直接丟掉
-        if x <= 2 or y <= 2 or (x + w) >= w_img_full - 2 or (y + h) >= h_img_full - 2:
+        if x <= 5 or y <= 5 or (x + w) >= w_img_full - 5 or (y + h) >= h_img_full - 5:
             continue
             
-        # 形狀過濾
         if use_strict_filter:
             aspect_ratio = w / float(h)
             if aspect_ratio > 3.0 or aspect_ratio < 0.1:
@@ -229,6 +256,9 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         processing_boxes = merge_nearby_boxes(raw_boxes, threshold=merge_dist)
     else:
         processing_boxes = raw_boxes
+
+    # [V60] 執行一致性過濾
+    processing_boxes = filter_by_consistency(processing_boxes, use_consistency)
 
     if not use_tracking:
         processing_boxes.sort(key=lambda b: b[0])
@@ -245,7 +275,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         sh, sw = sub_roi.shape
         if sw == 0 or sh == 0: continue
         
-        # [V58] 呼叫扎實度檢查
         if use_strict_filter:
             if not is_valid_digit_shape(sub_roi):
                 continue
@@ -275,15 +304,14 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
     else:
         final_ids = list(range(1, len(valid_boxes) + 1))
 
-    detected_info = []
-
+    # 先收集所有候選結果
+    candidates = []
     if len(rois_to_pred) > 0:
         predictions = cnn_model.predict(np.array(rois_to_pred), verbose=0)
         
         for i, pred_probs in enumerate(predictions):
             res_id = np.argmax(pred_probs)
             confidence = np.max(pred_probs)
-            rx, ry, w, h = coords_to_draw[i]
             
             threshold = min_confidence
             if use_strict_filter:
@@ -291,29 +319,50 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 
             if confidence < threshold:
                 continue
-
-            current_id = final_ids[i] 
-
-            roi_display = cv2.cvtColor(binary_proc[ry:ry+h, rx:rx+w], cv2.COLOR_GRAY2RGB)
-            roi_display = cv2.bitwise_not(roi_display)
-
-            detected_info.append({
-                "id": current_id,
-                "digit": str(res_id), 
-                "confidence": float(confidence),
-                "roi_img": roi_display
+            
+            # 暫存結果
+            candidates.append({
+                "res_id": res_id,
+                "confidence": confidence,
+                "box_idx": i,
+                "coord": coords_to_draw[i],
+                "track_id": final_ids[i]
             })
-            
-            label = f"#{current_id}"
-            pad = box_padding
-            p_x1 = max(0, rx - pad)
-            p_y1 = max(0, ry - pad)
-            p_x2 = min(w_img_full, rx + w + pad)
-            p_y2 = min(h_img_full, ry + h + pad)
 
-            cv2.rectangle(result_img, (p_x1, p_y1), (p_x2, p_y2), (0, 255, 0), 2)
-            cv2.putText(result_img, label, (p_x1, p_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            
+    # [V60] Top-K 過濾
+    # 依照信心度排序，只取前 K 個
+    candidates.sort(key=lambda x: x['confidence'], reverse=True)
+    if top_k > 0:
+        candidates = candidates[:top_k]
+
+    # 最後整理輸出
+    detected_info = []
+    for cand in candidates:
+        i = cand['box_idx']
+        rx, ry, w, h = cand['coord']
+        
+        roi_display = cv2.cvtColor(binary_proc[ry:ry+h, rx:rx+w], cv2.COLOR_GRAY2RGB)
+        roi_display = cv2.bitwise_not(roi_display)
+        
+        detected_info.append({
+            "id": cand['track_id'],
+            "digit": str(cand['res_id']), 
+            "confidence": float(cand['confidence']),
+            "roi_img": roi_display
+        })
+
+        # 畫框框
+        label = f"#{cand['track_id']}"
+        pad = box_padding
+        p_x1 = max(0, rx - pad)
+        p_y1 = max(0, ry - pad)
+        p_x2 = min(w_img_full, rx + w + pad)
+        p_y2 = min(h_img_full, ry + h + pad)
+
+        cv2.rectangle(result_img, (p_x1, p_y1), (p_x2, p_y2), (0, 255, 0), 2)
+        cv2.putText(result_img, label, (p_x1, p_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+    # 顯示時還是依照 ID 排序比較好看
     detected_info.sort(key=lambda x: x['id'])
             
     return result_img, detected_info
@@ -321,7 +370,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V58 Solidity)")
+st.title("🔢 AI 手寫辨識 (V60 Stats)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -354,6 +403,16 @@ dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 2)
 use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True)
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("🛡️ 過濾與篩選")
+use_strict_filter = st.sidebar.checkbox("🛡️ 嚴格過濾非數字", value=True, help="過濾複雜形狀與低信心的框框")
+
+# [V60] 新增一致性過濾
+use_consistency = st.sidebar.checkbox("📊 啟用一致性大小過濾", value=True, help="【推薦】只保留大小差不多的框框，會自動過濾掉特別大或特別小的雜訊。")
+
+# [V60] 新增 Top-K 限制
+top_k = st.sidebar.slider("🏆 最多顯示幾個結果", 0, 50, 10, help="【終極大招】畫面太亂時，直接限制只顯示信心最高的 N 個數字。設為 0 代表不限制。")
+
+st.sidebar.markdown("---")
 st.sidebar.subheader("🧲 進階修復")
 enable_merge = st.sidebar.checkbox("啟用斷字合併", value=False)
 merge_dist = 0
@@ -361,13 +420,9 @@ if enable_merge:
     merge_dist = st.sidebar.slider("合併距離 (像素)", 5, 50, 20)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🛡️ 過濾設定")
-use_strict_filter = st.sidebar.checkbox("🛡️ 嚴格過濾非數字", value=True, help="【強烈建議開啟】使用幾何扎實度與破洞檢查，專門過濾中文字與複雜背景。")
-
+st.sidebar.subheader("🤖 靈敏度")
 min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
-
-st.sidebar.subheader("🎛️ 靈敏度 (重要)")
-min_area = st.sidebar.slider("最小面積 (數字不見調這裡)", 10, 500, 100) # [V58] 預設調高到 100，避免抓到梗圖裡的小雜點
+min_area = st.sidebar.slider("最小面積", 10, 500, 100)
 min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
 show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
@@ -375,7 +430,7 @@ def run_app(source_image, use_tracking=False):
     result_img, info_list = process_and_predict(
         source_image, min_area, min_density, min_confidence, box_padding, 
         proc_mode_sel, manual_thresh, dilation_iter, use_morph_close, merge_dist, 
-        use_tracking, use_strict_filter, show_debug
+        use_tracking, use_strict_filter, use_consistency, top_k, show_debug
     )
     
     c1, c2 = st.columns([3, 2])
@@ -407,8 +462,8 @@ def run_app(source_image, use_tracking=False):
                     st.divider()
         else:
             if use_strict_filter:
-                st.warning("⚠️ 未發現數字 (已過濾雜訊)")
-                st.info("系統偵測到畫面太複雜（可能是中文或梗圖），已自動忽略。")
+                st.warning("⚠️ 未發現數字")
+                st.info("畫面太複雜或信心不足。試試看關閉「嚴格過濾」或調整「Top-K」。")
             else:
                 st.warning("⚠️ 畫面中未發現數字！")
 
