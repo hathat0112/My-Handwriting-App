@@ -11,7 +11,7 @@ import math
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V56 Strict)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V57 Anti-Noise)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -120,7 +120,57 @@ def update_tracker(current_boxes_coords):
     st.session_state.tracker['next_id'] = next_id
     return final_ids_for_boxes
 
-# [V56] 新增 use_strict_filter 參數
+# [V57] 新增：幾何複雜度檢查 (專門過濾中文和塗鴉)
+def is_valid_digit_shape(roi_binary):
+    # 1. 檢查破洞數量 (Holes)
+    # 數字 8 最多只有 2 個洞。如果超過 2 個洞，肯定是中文或亂畫。
+    contours, hierarchy = cv2.findContours(roi_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None: return True
+    
+    # hierarchy 結構: [Next, Previous, First_Child, Parent]
+    # 如果 Parent != -1，代表它是內部的洞
+    holes = 0
+    for h in hierarchy[0]:
+        if h[3] != -1:
+            holes += 1
+            
+    if holes > 2:
+        return False # 太複雜了，不是數字
+
+    # 2. 檢查線條複雜度 (Crossing Number)
+    # 在圖片中間畫一條線，看它穿過幾次白色的筆劃
+    # 數字最多穿過 3 條線 (例如 W 形狀)。如果穿過 4 條以上，肯定是複雜圖形。
+    h, w = roi_binary.shape
+    
+    # 檢查三條水平線 (25%, 50%, 75% 位置)
+    check_rows = [int(h*0.25), int(h*0.5), int(h*0.75)]
+    for r in check_rows:
+        row_pixels = roi_binary[r, :]
+        # 計算 0->255 的跳變次數 (代表有幾筆劃)
+        transitions = 0
+        prev_val = 0
+        for val in row_pixels:
+            if val > 127 and prev_val <= 127:
+                transitions += 1
+            prev_val = val
+        if transitions > 3: # 如果一列裡面有超過 3 個獨立筆劃，太複雜
+            return False
+
+    # 檢查三條垂直線
+    check_cols = [int(w*0.25), int(w*0.5), int(w*0.75)]
+    for c in check_cols:
+        col_pixels = roi_binary[:, c]
+        transitions = 0
+        prev_val = 0
+        for val in col_pixels:
+            if val > 127 and prev_val <= 127:
+                transitions += 1
+            prev_val = val
+        if transitions > 3:
+            return False
+
+    return True
+
 def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, use_morph_close, merge_dist, use_tracking, use_strict_filter, show_debug):
     result_img = image_bgr.copy()
     h_img_full, w_img_full = result_img.shape[:2]
@@ -158,12 +208,11 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         x, y, w, h = stats_cc[i, :4]
         if x <= 1 or y <= 1 or (x + w) >= binary_proc.shape[1] - 1 or (y + h) >= binary_proc.shape[0] - 1: continue
         
-        # [V56] 幾何形狀過濾 (第一關：長寬比)
-        # 數字通常長寬比會在 0.2 ~ 2.0 之間
-        # 如果太寬 (> 3.0) 或是太細長 (< 0.1)，很有可能是塗鴉線條
+        # [V57] 基礎形狀過濾
         if use_strict_filter:
             aspect_ratio = w / float(h)
-            if aspect_ratio > 2.5 or aspect_ratio < 0.15:
+            # 數字通常不會太扁 (如 0.1) 也不會太寬 (如 3.0)
+            if aspect_ratio > 3.0 or aspect_ratio < 0.1:
                 continue
 
         raw_boxes.append([x, y, w, h])
@@ -188,6 +237,12 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         sh, sw = sub_roi.shape
         if sw == 0 or sh == 0: continue
         
+        # [V57] 進階幾何過濾 (Holes & Crossing Number)
+        if use_strict_filter:
+            if not is_valid_digit_shape(sub_roi):
+                # 這是複雜圖形(如中文或塗鴉)，跳過
+                continue
+
         n_white_pix = cv2.countNonZero(sub_roi)
         box_area = sw * sh
         density = n_white_pix / float(box_area)
@@ -223,11 +278,11 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             confidence = np.max(pred_probs)
             rx, ry, w, h = coords_to_draw[i]
             
-            # [V56] 信心過濾 (第二關)
-            # 如果開啟嚴格過濾，我們強制忽略信心度低於 0.85 的東西 (即使滑桿設得很低)
+            # [V57] 信心過濾
             threshold = min_confidence
             if use_strict_filter:
-                threshold = max(0.85, min_confidence) # 取較高者，確保至少 0.85
+                # 嚴格模式下，信心門檻至少要 0.8
+                threshold = max(0.80, min_confidence)
 
             if confidence < threshold:
                 continue
@@ -261,7 +316,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V56 Strict)")
+st.title("🔢 AI 手寫辨識 (V57 Anti-Noise)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -302,8 +357,8 @@ if enable_merge:
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🛡️ 過濾設定")
-# [V56] 新增嚴格過濾開關
-use_strict_filter = st.sidebar.checkbox("🛡️ 過濾塗鴉與非數字", value=True, help="開啟後，如果 AI 信心不足 (低於 85%) 或是形狀怪異的圖案，將不會被顯示。適合用來過濾亂畫的圖。")
+# [V57] 這裡說明更清楚
+use_strict_filter = st.sidebar.checkbox("🛡️ 嚴格過濾非數字", value=True, help="【強烈建議開啟】會自動過濾掉「太複雜的圖案」(如中文、塗鴉) 和「長寬比怪異」的框框。")
 
 min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
 
@@ -349,7 +404,7 @@ def run_app(source_image, use_tracking=False):
         else:
             if use_strict_filter:
                 st.warning("⚠️ 未發現數字 (已開啟嚴格過濾)")
-                st.info("如果是正常的數字被過濾掉了，請嘗試關閉「🛡️ 過濾塗鴉與非數字」。")
+                st.info("AI 認為畫面上的東西太複雜，不像數字。")
             else:
                 st.warning("⚠️ 畫面中未發現數字！")
 
