@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V52 Merge)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V53 Smart)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -51,32 +51,20 @@ def split_touching_digits(roi_binary):
     if part1.shape[1] < 5 or part2.shape[1] < 5: return [(0, roi_binary)]
     return [(0, part1), (split_x, part2)]
 
-# [V52] 新增：合併靠近的框框
 def merge_nearby_boxes(boxes, threshold=20):
-    if not boxes:
-        return []
-    
-    # 根據 x 座標排序
+    if not boxes: return []
     boxes.sort(key=lambda b: b[0])
-    
     merged = []
-    current_box = boxes[0] # [x, y, w, h]
+    current_box = boxes[0] 
     
     for next_box in boxes[1:]:
         cx, cy, cw, ch = current_box
         nx, ny, nw, nh = next_box
         
-        # 計算水平距離 (右邊界 到 下一個的左邊界)
         distance = nx - (cx + cw)
-        
-        # 如果距離夠近，且垂直方向有重疊 (避免把上下兩行的字合併)
-        # 簡單判定：下一字的中心點 y 座標，是否在當前字的 y 範圍內
-        cy_center = cy + ch / 2
-        ny_center = ny + nh / 2
         vertical_overlap = (ny < cy + ch) and (ny + nh > cy)
 
         if distance < threshold and vertical_overlap:
-            # 執行合併：找出新的大框框邊界
             new_x = min(cx, nx)
             new_y = min(cy, ny)
             new_w = max(cx + cw, nx + nw) - new_x
@@ -119,37 +107,31 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
     if show_debug:
         st.image(binary_proc, caption=f"【Debug】二值化影像 (處理後)", width=300)
     
-    # 1. 先抓出所有框框
     nb, output, stats_cc, _ = cv2.connectedComponentsWithStats(binary_proc, connectivity=8)
     
-    # 簡單過濾一下太小的雜訊 (這裡只濾極小的，主要過濾留到後面)
     raw_boxes = []
     for i in range(1, nb):
         x, y, w, h = stats_cc[i, :4]
-        area = stats_cc[i, cv2.CC_STAT_AREA]
-        # 放寬邊界檢查
         if x <= 1 or y <= 1 or (x + w) >= binary_proc.shape[1] - 1 or (y + h) >= binary_proc.shape[0] - 1: continue
-        # 先不濾 area，等等合併完再濾
         raw_boxes.append([x, y, w, h])
 
-    # 2. [V52] 執行「斷字合併」邏輯
+    # [V53 修改] 只有當 merge_dist > 0 時才執行合併
     if merge_dist > 0:
-        merged_boxes = merge_nearby_boxes(raw_boxes, threshold=merge_dist)
+        processing_boxes = merge_nearby_boxes(raw_boxes, threshold=merge_dist)
     else:
-        merged_boxes = raw_boxes
+        processing_boxes = raw_boxes
 
     rois_to_pred = []
     coords_to_draw = []
     detected_info = []
 
-    # 3. 對合併後的框框進行最後處理與辨識
-    for box in merged_boxes:
+    for box in processing_boxes:
         x, y, w, h = box
         
-        # 這裡才切圖
-        # 注意：因為合併後的框框可能包含多個不連通的區域，我們直接切那個方形範圍
+        # 再次檢查合併後的框框大小，太小的可能是合併後的雜訊
+        if w * h < min_area: continue
+
         sub_roi = binary_proc[y:y+h, x:x+w]
-        
         sh, sw = sub_roi.shape
         if sw == 0 or sh == 0: continue
         
@@ -157,7 +139,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         box_area = sw * sh
         density = n_white_pix / float(box_area)
 
-        # 最後過濾
         if n_white_pix < min_area: continue
         if density < min_density: continue
         
@@ -170,7 +151,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         final_roi_norm = np.expand_dims(final_roi.astype('float32') / 255.0, axis=-1)
         
         rois_to_pred.append(final_roi_norm)
-        coords_to_draw.append((x, y, w, h)) # 這裡不加 offset，因為我們是用 merge box 的座標
+        coords_to_draw.append((x, y, w, h))
 
     if len(rois_to_pred) > 0:
         predictions = cnn_model.predict(np.array(rois_to_pred), verbose=0)
@@ -214,7 +195,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V52 Merge)")
+st.title("🔢 AI 手寫辨識 (V53 Smart)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -236,13 +217,17 @@ if proc_mode_sel == "manual":
 else:
     manual_thresh = 127
 
-box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10)
+box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10, help="如果覺得綠色框框太貼，可以調大這個")
 dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 2)
 use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True)
 
-# [V52 新增] 斷字合併滑桿
+# [V53 修改] 把合併功能改成預設關閉的 Checkbox
 st.sidebar.markdown("---")
-merge_dist = st.sidebar.slider("🧲 斷字合併 (Merge)", 0, 50, 20, help="如果數字斷成兩半(如2斷成兩截)，調大這個數值可以把吸在一起")
+st.sidebar.subheader("🧲 進階修復")
+enable_merge = st.sidebar.checkbox("啟用斷字合併 (修復斷裂數字)", value=False, help="只有當數字(如2)斷成兩半時才開啟，否則會把靠太近的字黏在一起！")
+merge_dist = 0
+if enable_merge:
+    merge_dist = st.sidebar.slider("合併距離 (像素)", 5, 50, 20)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 辨識設定")
@@ -282,10 +267,8 @@ def run_app(source_image):
             st.warning("⚠️ 畫面中未發現數字！")
             st.info("""
             **💡 小撇步：如何找回消失的字？**
-            
-            1. 📉 **調低「最小面積」** (試試看 20 或 30)
-            2. 🧲 **調大「斷字合併」** (把斷掉的字吸在一起)
-            3. 🐡 **調大「筆畫膨脹」**
+            1. 📉 **調低「最小面積」**
+            2. 🐡 **調大「筆畫膨脹」**
             """)
 
 # 介面渲染
