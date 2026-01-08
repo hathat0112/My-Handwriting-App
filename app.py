@@ -11,7 +11,7 @@ import math
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V57 Anti-Noise)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V58 Solidity)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -120,43 +120,49 @@ def update_tracker(current_boxes_coords):
     st.session_state.tracker['next_id'] = next_id
     return final_ids_for_boxes
 
-# [V57] 新增：幾何複雜度檢查 (專門過濾中文和塗鴉)
-def is_valid_digit_shape(roi_binary):
-    # 1. 檢查破洞數量 (Holes)
-    # 數字 8 最多只有 2 個洞。如果超過 2 個洞，肯定是中文或亂畫。
+# [V58] 新增：扎實度 (Solidity) 與 凸包檢查
+def is_valid_digit_shape(roi_binary, show_debug_info=False):
     contours, hierarchy = cv2.findContours(roi_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    if hierarchy is None: return True
+    if not contours: return False
     
-    # hierarchy 結構: [Next, Previous, First_Child, Parent]
-    # 如果 Parent != -1，代表它是內部的洞
-    holes = 0
-    for h in hierarchy[0]:
-        if h[3] != -1:
-            holes += 1
-            
-    if holes > 2:
-        return False # 太複雜了，不是數字
+    # 找出最大的輪廓
+    c = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(c)
+    
+    if area < 10: return False # 太小
+    
+    # 1. 扎實度檢查 (Solidity)
+    hull = cv2.convexHull(c)
+    hull_area = cv2.contourArea(hull)
+    if hull_area == 0: return False
+    solidity = float(area) / hull_area
+    
+    # 中文字的筆劃通常很散，Solidity 會很低
+    # 數字通常比較飽滿，Solidity 較高 (除了 1 和 7 可能較低，但通常也在 0.25 以上)
+    if solidity < 0.25: 
+        return False 
 
-    # 2. 檢查線條複雜度 (Crossing Number)
-    # 在圖片中間畫一條線，看它穿過幾次白色的筆劃
-    # 數字最多穿過 3 條線 (例如 W 形狀)。如果穿過 4 條以上，肯定是複雜圖形。
+    # 2. 破洞檢查
+    holes = 0
+    if hierarchy is not None:
+        for h in hierarchy[0]:
+            if h[3] != -1:
+                holes += 1
+    if holes > 2: return False 
+
+    # 3. 線條複雜度 (Crossing Number)
     h, w = roi_binary.shape
-    
-    # 檢查三條水平線 (25%, 50%, 75% 位置)
     check_rows = [int(h*0.25), int(h*0.5), int(h*0.75)]
     for r in check_rows:
         row_pixels = roi_binary[r, :]
-        # 計算 0->255 的跳變次數 (代表有幾筆劃)
         transitions = 0
         prev_val = 0
         for val in row_pixels:
             if val > 127 and prev_val <= 127:
                 transitions += 1
             prev_val = val
-        if transitions > 3: # 如果一列裡面有超過 3 個獨立筆劃，太複雜
-            return False
+        if transitions > 3: return False
 
-    # 檢查三條垂直線
     check_cols = [int(w*0.25), int(w*0.5), int(w*0.75)]
     for c in check_cols:
         col_pixels = roi_binary[:, c]
@@ -166,8 +172,7 @@ def is_valid_digit_shape(roi_binary):
             if val > 127 and prev_val <= 127:
                 transitions += 1
             prev_val = val
-        if transitions > 3:
-            return False
+        if transitions > 3: return False
 
     return True
 
@@ -206,12 +211,15 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
     raw_boxes = []
     for i in range(1, nb):
         x, y, w, h = stats_cc[i, :4]
-        if x <= 1 or y <= 1 or (x + w) >= binary_proc.shape[1] - 1 or (y + h) >= binary_proc.shape[0] - 1: continue
         
-        # [V57] 基礎形狀過濾
+        # [V58] 邊界過濾 (Border Check)
+        # 如果框框貼到圖片的最邊緣 (誤差 2 pixel)，很有可能是切割雜訊或滿版文字，直接丟掉
+        if x <= 2 or y <= 2 or (x + w) >= w_img_full - 2 or (y + h) >= h_img_full - 2:
+            continue
+            
+        # 形狀過濾
         if use_strict_filter:
             aspect_ratio = w / float(h)
-            # 數字通常不會太扁 (如 0.1) 也不會太寬 (如 3.0)
             if aspect_ratio > 3.0 or aspect_ratio < 0.1:
                 continue
 
@@ -237,10 +245,9 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         sh, sw = sub_roi.shape
         if sw == 0 or sh == 0: continue
         
-        # [V57] 進階幾何過濾 (Holes & Crossing Number)
+        # [V58] 呼叫扎實度檢查
         if use_strict_filter:
             if not is_valid_digit_shape(sub_roi):
-                # 這是複雜圖形(如中文或塗鴉)，跳過
                 continue
 
         n_white_pix = cv2.countNonZero(sub_roi)
@@ -278,11 +285,9 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             confidence = np.max(pred_probs)
             rx, ry, w, h = coords_to_draw[i]
             
-            # [V57] 信心過濾
             threshold = min_confidence
             if use_strict_filter:
-                # 嚴格模式下，信心門檻至少要 0.8
-                threshold = max(0.80, min_confidence)
+                threshold = max(0.85, min_confidence)
 
             if confidence < threshold:
                 continue
@@ -316,7 +321,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V57 Anti-Noise)")
+st.title("🔢 AI 手寫辨識 (V58 Solidity)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -357,13 +362,12 @@ if enable_merge:
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🛡️ 過濾設定")
-# [V57] 這裡說明更清楚
-use_strict_filter = st.sidebar.checkbox("🛡️ 嚴格過濾非數字", value=True, help="【強烈建議開啟】會自動過濾掉「太複雜的圖案」(如中文、塗鴉) 和「長寬比怪異」的框框。")
+use_strict_filter = st.sidebar.checkbox("🛡️ 嚴格過濾非數字", value=True, help="【強烈建議開啟】使用幾何扎實度與破洞檢查，專門過濾中文字與複雜背景。")
 
 min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
 
 st.sidebar.subheader("🎛️ 靈敏度 (重要)")
-min_area = st.sidebar.slider("最小面積 (數字不見調這裡)", 10, 500, 50)
+min_area = st.sidebar.slider("最小面積 (數字不見調這裡)", 10, 500, 100) # [V58] 預設調高到 100，避免抓到梗圖裡的小雜點
 min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
 show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
@@ -403,8 +407,8 @@ def run_app(source_image, use_tracking=False):
                     st.divider()
         else:
             if use_strict_filter:
-                st.warning("⚠️ 未發現數字 (已開啟嚴格過濾)")
-                st.info("AI 認為畫面上的東西太複雜，不像數字。")
+                st.warning("⚠️ 未發現數字 (已過濾雜訊)")
+                st.info("系統偵測到畫面太複雜（可能是中文或梗圖），已自動忽略。")
             else:
                 st.warning("⚠️ 畫面中未發現數字！")
 
