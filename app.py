@@ -11,7 +11,7 @@ import math
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V63 Auto-Filter)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V65 Cut)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -64,28 +64,6 @@ def split_touching_digits(roi_binary):
     if part1.shape[1] < 5 or part2.shape[1] < 5: return [(0, roi_binary)]
     return [(0, part1), (split_x, part2)]
 
-def merge_nearby_boxes(boxes, threshold=20):
-    if not boxes: return []
-    boxes.sort(key=lambda b: b[0])
-    merged = []
-    current_box = boxes[0] 
-    for next_box in boxes[1:]:
-        cx, cy, cw, ch = current_box
-        nx, ny, nw, nh = next_box
-        distance = nx - (cx + cw)
-        vertical_overlap = (ny < cy + ch) and (ny + nh > cy)
-        if distance < threshold and vertical_overlap:
-            new_x = min(cx, nx)
-            new_y = min(cy, ny)
-            new_w = max(cx + cw, nx + nw) - new_x
-            new_h = max(cy + ch, ny + nh) - new_y
-            current_box = [new_x, new_y, new_w, new_h]
-        else:
-            merged.append(current_box)
-            current_box = next_box
-    merged.append(current_box)
-    return merged
-
 def update_tracker(current_boxes_coords):
     tracked_objects = st.session_state.tracker['objects']
     next_id = st.session_state.tracker['next_id']
@@ -120,91 +98,13 @@ def update_tracker(current_boxes_coords):
     st.session_state.tracker['next_id'] = next_id
     return final_ids_for_boxes
 
-def is_valid_digit_shape(roi_binary, show_debug_info=False):
-    contours, hierarchy = cv2.findContours(roi_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours: return False
+# [V65] 新增 erosion_iter 參數
+def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, erosion_iter, use_morph_close, use_tracking, show_debug):
     
-    c = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(c)
+    result_img = image_bgr.copy()
+    h_img_full, w_img_full = result_img.shape[:2]
     
-    if area < 10: return False 
-    
-    hull = cv2.convexHull(c)
-    hull_area = cv2.contourArea(hull)
-    if hull_area == 0: return False
-    solidity = float(area) / hull_area
-    
-    if solidity < 0.25: 
-        return False 
-
-    holes = 0
-    if hierarchy is not None:
-        for h in hierarchy[0]:
-            if h[3] != -1:
-                holes += 1
-    if holes > 2: return False 
-
-    h, w = roi_binary.shape
-    check_rows = [int(h*0.25), int(h*0.5), int(h*0.75)]
-    for r in check_rows:
-        row_pixels = roi_binary[r, :]
-        transitions = 0
-        prev_val = 0
-        for val in row_pixels:
-            if val > 127 and prev_val <= 127:
-                transitions += 1
-            prev_val = val
-        if transitions > 3: return False
-
-    check_cols = [int(w*0.25), int(w*0.5), int(w*0.75)]
-    for c in check_cols:
-        col_pixels = roi_binary[:, c]
-        transitions = 0
-        prev_val = 0
-        for val in col_pixels:
-            if val > 127 and prev_val <= 127:
-                transitions += 1
-            prev_val = val
-        if transitions > 3: return False
-
-    return True
-
-def filter_by_consistency(boxes, use_consistency):
-    if not use_consistency or len(boxes) < 3:
-        return boxes
-    areas = [b[2] * b[3] for b in boxes]
-    median_area = np.median(areas)
-    filtered_boxes = []
-    for i, box in enumerate(boxes):
-        area = areas[i]
-        if area > median_area * 0.2 and area < median_area * 3.0:
-            filtered_boxes.append(box)
-    return filtered_boxes
-
-# [V63] 移除了 max_area 參數，直接內建邏輯
-def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, use_morph_close, merge_dist, use_tracking, use_strict_filter, use_consistency, top_k, crop_params, show_debug):
-    
-    h_orig, w_orig = image_bgr.shape[:2]
-    top_p, bottom_p, left_p, right_p = crop_params
-    
-    y1 = int(h_orig * top_p / 100)
-    y2 = int(h_orig * (100 - bottom_p) / 100)
-    x1 = int(w_orig * left_p / 100)
-    x2 = int(w_orig * (100 - right_p) / 100)
-    
-    if x2 <= x1 or y2 <= y1:
-        return image_bgr, []
-
-    cropped_img = image_bgr[y1:y2, x1:x2].copy()
-    
-    if cropped_img.shape[0] < 10 or cropped_img.shape[1] < 10:
-        return image_bgr, []
-
-    h_img_full, w_img_full = cropped_img.shape[:2]
-    # [V63] 計算整張圖的面積，用來做動態過濾
-    total_image_area = h_img_full * w_img_full
-    
-    gray = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
     if proc_mode == "adaptive":
@@ -220,13 +120,11 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         _, thresh = cv2.threshold(blur, 0, 255, flag)
         binary_proc = thresh
 
-    if use_strict_filter:
-        margin_x = int(w_img_full * 0.05)
-        margin_y = int(h_img_full * 0.05)
-        cv2.rectangle(binary_proc, (0, 0), (w_img_full, margin_y), 0, -1)
-        cv2.rectangle(binary_proc, (0, h_img_full-margin_y), (w_img_full, h_img_full), 0, -1)
-        cv2.rectangle(binary_proc, (0, 0), (margin_x, h_img_full), 0, -1)
-        cv2.rectangle(binary_proc, (w_img_full-margin_x, 0), (w_img_full, h_img_full), 0, -1)
+    # [V65] 腐蝕切割 (Erosion) - 手術刀
+    # 把它放在膨脹之前，先把黏在一起的東西切開
+    if erosion_iter > 0:
+        kernel = np.ones((3,3), np.uint8)
+        binary_proc = cv2.erode(binary_proc, kernel, iterations=erosion_iter)
 
     if use_morph_close:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -236,33 +134,19 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         binary_proc = cv2.dilate(binary_proc, None, iterations=dilation_iter)
     
     if show_debug:
-        st.image(binary_proc, caption=f"【Debug】二值化影像 (裁切後區域)", width=300)
+        st.image(binary_proc, caption=f"【Debug】二值化影像 (切割後)", width=300)
     
     nb, output, stats_cc, _ = cv2.connectedComponentsWithStats(binary_proc, connectivity=8)
     
     raw_boxes = []
     for i in range(1, nb):
         x, y, w, h = stats_cc[i, :4]
-        
-        # [V63] 自動最大面積過濾
-        # 如果單一框框佔了整張圖的 60% 以上，直接當作是背景雜訊
-        box_area = w * h
-        if box_area > (total_image_area * 0.6):
-            continue
-
-        if x <= 2 or y <= 2 or (x + w) >= w_img_full - 2 or (y + h) >= h_img_full - 2: continue
-        if use_strict_filter:
-            aspect_ratio = w / float(h)
-            if aspect_ratio > 3.0 or aspect_ratio < 0.1: continue
+        # 不做任何過濾，只濾極小雜訊
+        if w * h < 10: continue 
         raw_boxes.append([x, y, w, h])
 
-    if merge_dist > 0:
-        processing_boxes = merge_nearby_boxes(raw_boxes, threshold=merge_dist)
-    else:
-        processing_boxes = raw_boxes
-
-    processing_boxes = filter_by_consistency(processing_boxes, use_consistency)
-
+    processing_boxes = raw_boxes
+    
     if not use_tracking:
         processing_boxes.sort(key=lambda b: b[0])
 
@@ -273,17 +157,12 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
     for box in processing_boxes:
         x, y, w, h = box
         
-        # 合併後也要檢查一次，不能大於 60%
-        if (w * h) > (total_image_area * 0.6): continue
         if w * h < min_area: continue
 
         sub_roi = binary_proc[y:y+h, x:x+w]
         sh, sw = sub_roi.shape
         if sw == 0 or sh == 0: continue
         
-        if use_strict_filter:
-            if not is_valid_digit_shape(sub_roi): continue
-
         n_white_pix = cv2.countNonZero(sub_roi)
         box_area = sw * sh
         density = n_white_pix / float(box_area)
@@ -317,11 +196,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             res_id = np.argmax(pred_probs)
             confidence = np.max(pred_probs)
             
-            threshold = min_confidence
-            if use_strict_filter:
-                threshold = max(0.85, min_confidence)
-
-            if confidence < threshold: continue
+            if confidence < min_confidence: continue
             
             candidates.append({
                 "res_id": res_id,
@@ -332,18 +207,13 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             })
 
     candidates.sort(key=lambda x: x['confidence'], reverse=True)
-    if top_k > 0:
-        candidates = candidates[:top_k]
 
     result_img_display = image_bgr.copy()
-    cv2.rectangle(result_img_display, (x1, y1), (x2, y2), (255, 0, 0), 2) 
 
     detected_info = []
     for cand in candidates:
         i = cand['box_idx']
         rx, ry, w, h = cand['coord']
-        orig_x = x1 + rx
-        orig_y = y1 + ry
         
         roi_display = cv2.cvtColor(binary_proc[ry:ry+h, rx:rx+w], cv2.COLOR_GRAY2RGB)
         roi_display = cv2.bitwise_not(roi_display)
@@ -357,10 +227,10 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 
         label = f"#{cand['track_id']}"
         pad = box_padding
-        p_x1 = max(0, orig_x - pad)
-        p_y1 = max(0, orig_y - pad)
-        p_x2 = min(w_orig, orig_x + w + pad)
-        p_y2 = min(h_orig, orig_y + h + pad)
+        p_x1 = max(0, rx - pad)
+        p_y1 = max(0, ry - pad)
+        p_x2 = min(w_img_full, rx + w + pad)
+        p_y2 = min(h_img_full, ry + h + pad)
 
         cv2.rectangle(result_img_display, (p_x1, p_y1), (p_x2, p_y2), (0, 255, 0), 2)
         cv2.putText(result_img_display, label, (p_x1, p_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -372,7 +242,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V63 Auto-Filter)")
+st.title("🔢 AI 手寫辨識 (V65 Cut)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -384,18 +254,6 @@ if st.session_state.last_mode != mode_option:
     st.session_state.last_mode = mode_option
 
 st.sidebar.markdown("---")
-with st.sidebar.expander("✂️ 手動裁切區域 (關注設定)", expanded=False):
-    col_t, col_b = st.columns(2)
-    with col_t:
-        top_crop = st.slider("頂部裁切 %", 0, 50, 0)
-    with col_b:
-        bottom_crop = st.slider("底部裁切 %", 0, 50, 0)
-    col_l, col_r = st.columns(2)
-    with col_l:
-        left_crop = st.slider("左側裁切 %", 0, 50, 0)
-    with col_r:
-        right_crop = st.slider("右側裁切 %", 0, 50, 0)
-
 st.sidebar.subheader("🖼️ 影像處理")
 proc_mode_sel = st.sidebar.radio(
     "選擇演算法",
@@ -413,38 +271,27 @@ else:
     manual_thresh = 127
 
 box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10)
-dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 2)
+
+# [V65] 新增：雜訊切割 (Erosion)
+st.sidebar.markdown("### 🔪 手術刀工具")
+erosion_iter = st.sidebar.slider("切割沾黏 (Erosion)", 0, 5, 0, help="【關鍵功能】如果數字跟背景黏在一起變成一個大框框，請調大這個數值！它會把黏住的地方切斷。")
+dilation_iter = st.sidebar.slider("筆畫膨脹 (Dilation)", 0, 3, 2)
 use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🛡️ 過濾與篩選")
-use_strict_filter = st.sidebar.checkbox("🛡️ 嚴格過濾非數字", value=True)
-use_consistency = st.sidebar.checkbox("📊 啟用一致性大小過濾", value=True)
-top_k = st.sidebar.slider("🏆 最多顯示幾個結果", 0, 50, 10)
-
-st.sidebar.subheader("🧲 進階修復")
-enable_merge = st.sidebar.checkbox("啟用斷字合併", value=False)
-merge_dist = 0
-if enable_merge:
-    merge_dist = st.sidebar.slider("合併距離 (像素)", 5, 50, 20)
-
-st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 靈敏度")
-min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
-
-# [V63] 移除了 Max Area 滑桿，改為自動內建
-min_area = st.sidebar.slider("最小面積 (過濾小雜訊)", 10, 500, 50)
+# [V65] 預設信心調低，讓使用者能先看到所有東西
+min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.20, help="如果找不到數字，先把它拉到 0，看看是不是被過濾掉了") 
+min_area = st.sidebar.slider("最小面積", 10, 500, 50)
 min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
 show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
 def run_app(source_image, use_tracking=False):
-    crop_params = (top_crop, bottom_crop, left_crop, right_crop)
-    
-    # 移除 max_area 參數傳遞
+    # 移除多餘參數
     result_img, info_list = process_and_predict(
         source_image, min_area, min_density, min_confidence, box_padding, 
-        proc_mode_sel, manual_thresh, dilation_iter, use_morph_close, merge_dist, 
-        use_tracking, use_strict_filter, use_consistency, top_k, crop_params, show_debug
+        proc_mode_sel, manual_thresh, dilation_iter, erosion_iter, use_morph_close, 
+        use_tracking, show_debug
     )
     
     c1, c2 = st.columns([3, 2])
@@ -475,11 +322,7 @@ def run_app(source_image, use_tracking=False):
                         st.progress(conf)
                     st.divider()
         else:
-            if use_strict_filter:
-                st.warning("⚠️ 未發現數字")
-                st.info("系統已自動過濾過大或過小的雜訊。")
-            else:
-                st.warning("⚠️ 畫面中未發現數字！")
+            st.warning("⚠️ 畫面中未發現數字！")
 
 # 介面渲染
 if mode_option == "✍️ 手寫板":
