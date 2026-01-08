@@ -10,7 +10,7 @@ import pandas as pd
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V51 Pure)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V52 Merge)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -51,9 +51,45 @@ def split_touching_digits(roi_binary):
     if part1.shape[1] < 5 or part2.shape[1] < 5: return [(0, roi_binary)]
     return [(0, part1), (split_x, part2)]
 
-# [V51] 移除了 analyze_hole_geometry (幾何分析) 函式，因為不再需要人工規則
+# [V52] 新增：合併靠近的框框
+def merge_nearby_boxes(boxes, threshold=20):
+    if not boxes:
+        return []
+    
+    # 根據 x 座標排序
+    boxes.sort(key=lambda b: b[0])
+    
+    merged = []
+    current_box = boxes[0] # [x, y, w, h]
+    
+    for next_box in boxes[1:]:
+        cx, cy, cw, ch = current_box
+        nx, ny, nw, nh = next_box
+        
+        # 計算水平距離 (右邊界 到 下一個的左邊界)
+        distance = nx - (cx + cw)
+        
+        # 如果距離夠近，且垂直方向有重疊 (避免把上下兩行的字合併)
+        # 簡單判定：下一字的中心點 y 座標，是否在當前字的 y 範圍內
+        cy_center = cy + ch / 2
+        ny_center = ny + nh / 2
+        vertical_overlap = (ny < cy + ch) and (ny + nh > cy)
 
-def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, use_morph_close, show_debug):
+        if distance < threshold and vertical_overlap:
+            # 執行合併：找出新的大框框邊界
+            new_x = min(cx, nx)
+            new_y = min(cy, ny)
+            new_w = max(cx + cw, nx + nw) - new_x
+            new_h = max(cy + ch, ny + nh) - new_y
+            current_box = [new_x, new_y, new_w, new_h]
+        else:
+            merged.append(current_box)
+            current_box = next_box
+            
+    merged.append(current_box)
+    return merged
+
+def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, use_morph_close, merge_dist, show_debug):
     result_img = image_bgr.copy()
     h_img_full, w_img_full = result_img.shape[:2]
     
@@ -83,43 +119,58 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
     if show_debug:
         st.image(binary_proc, caption=f"【Debug】二值化影像 (處理後)", width=300)
     
+    # 1. 先抓出所有框框
     nb, output, stats_cc, _ = cv2.connectedComponentsWithStats(binary_proc, connectivity=8)
-    raw_boxes = sorted([stats_cc[i, :4] for i in range(1, nb)], key=lambda b: b[0])
+    
+    # 簡單過濾一下太小的雜訊 (這裡只濾極小的，主要過濾留到後面)
+    raw_boxes = []
+    for i in range(1, nb):
+        x, y, w, h = stats_cc[i, :4]
+        area = stats_cc[i, cv2.CC_STAT_AREA]
+        # 放寬邊界檢查
+        if x <= 1 or y <= 1 or (x + w) >= binary_proc.shape[1] - 1 or (y + h) >= binary_proc.shape[0] - 1: continue
+        # 先不濾 area，等等合併完再濾
+        raw_boxes.append([x, y, w, h])
+
+    # 2. [V52] 執行「斷字合併」邏輯
+    if merge_dist > 0:
+        merged_boxes = merge_nearby_boxes(raw_boxes, threshold=merge_dist)
+    else:
+        merged_boxes = raw_boxes
 
     rois_to_pred = []
     coords_to_draw = []
     detected_info = []
 
-    for box in raw_boxes:
+    # 3. 對合併後的框框進行最後處理與辨識
+    for box in merged_boxes:
         x, y, w, h = box
-        if x <= 1 or y <= 1 or (x + w) >= binary_proc.shape[1] - 1 or (y + h) >= binary_proc.shape[0] - 1: continue
-        if h < 10: continue 
-
-        split_results = split_touching_digits(binary_proc[y:y+h, x:x+w])
         
-        for offset_x, sub_roi in split_results:
-            sh, sw = sub_roi.shape
-            if sw == 0 or sh == 0: continue
-            
-            n_white_pix = cv2.countNonZero(sub_roi)
-            box_area = sw * sh
-            density = n_white_pix / float(box_area)
+        # 這裡才切圖
+        # 注意：因為合併後的框框可能包含多個不連通的區域，我們直接切那個方形範圍
+        sub_roi = binary_proc[y:y+h, x:x+w]
+        
+        sh, sw = sub_roi.shape
+        if sw == 0 or sh == 0: continue
+        
+        n_white_pix = cv2.countNonZero(sub_roi)
+        box_area = sw * sh
+        density = n_white_pix / float(box_area)
 
-            if n_white_pix < min_area:
-                continue
-            if density < min_density:
-                continue
-            
-            side = max(sw, sh)
-            container = np.zeros((side+40, side+40), dtype=np.uint8)
-            offset_y, offset_x_c = 20 + (side-sh)//2, 20 + (side-sw)//2
-            container[offset_y:offset_y+sh, offset_x_c:offset_x_c+sw] = sub_roi
-            
-            final_roi = center_by_moments_cnn(cv2.resize(container, (28, 28), interpolation=cv2.INTER_AREA))
-            final_roi_norm = np.expand_dims(final_roi.astype('float32') / 255.0, axis=-1)
-            
-            rois_to_pred.append(final_roi_norm)
-            coords_to_draw.append((x + offset_x, y, sw, sh, sub_roi))
+        # 最後過濾
+        if n_white_pix < min_area: continue
+        if density < min_density: continue
+        
+        side = max(sw, sh)
+        container = np.zeros((side+40, side+40), dtype=np.uint8)
+        offset_y, offset_x_c = 20 + (side-sh)//2, 20 + (side-sw)//2
+        container[offset_y:offset_y+sh, offset_x_c:offset_x_c+sw] = sub_roi
+        
+        final_roi = center_by_moments_cnn(cv2.resize(container, (28, 28), interpolation=cv2.INTER_AREA))
+        final_roi_norm = np.expand_dims(final_roi.astype('float32') / 255.0, axis=-1)
+        
+        rois_to_pred.append(final_roi_norm)
+        coords_to_draw.append((x, y, w, h)) # 這裡不加 offset，因為我們是用 merge box 的座標
 
     if len(rois_to_pred) > 0:
         predictions = cnn_model.predict(np.array(rois_to_pred), verbose=0)
@@ -127,7 +178,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         for i, pred_probs in enumerate(predictions):
             res_id = np.argmax(pred_probs)
             confidence = np.max(pred_probs)
-            rx, ry, w, h, roi_original = coords_to_draw[i]
+            rx, ry, w, h = coords_to_draw[i]
             
             if confidence < min_confidence:
                 continue
@@ -135,9 +186,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             display_text = str(res_id)
             color = (0, 255, 0)
             
-            # [V51] 移除了所有 use_smart_logic 相關的修正代碼
-            
-            roi_display = cv2.cvtColor(roi_original, cv2.COLOR_GRAY2RGB)
+            roi_display = cv2.cvtColor(binary_proc[ry:ry+h, rx:rx+w], cv2.COLOR_GRAY2RGB)
             roi_display = cv2.bitwise_not(roi_display)
 
             current_id = len(detected_info) + 1
@@ -165,7 +214,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V51 Pure)")
+st.title("🔢 AI 手寫辨識 (V52 Merge)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -187,24 +236,25 @@ if proc_mode_sel == "manual":
 else:
     manual_thresh = 127
 
-box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10, help="如果覺得綠色框框太貼，可以調大這個")
-dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 2, help="【重要】如果字寫太細或斷斷續續，請把這個調大！")
-use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True, help="自動把斷掉的筆劃連起來")
+box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10)
+dilation_iter = st.sidebar.slider("🐡 筆畫膨脹 (變粗)", 0, 3, 2)
+use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True)
+
+# [V52 新增] 斷字合併滑桿
+st.sidebar.markdown("---")
+merge_dist = st.sidebar.slider("🧲 斷字合併 (Merge)", 0, 50, 20, help="如果數字斷成兩半(如2斷成兩截)，調大這個數值可以把吸在一起")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 辨識設定")
-# [V51] 移除了「啟用規則修正」與「信心溫度」
 min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
 
-st.sidebar.markdown("---")
 st.sidebar.subheader("🎛️ 靈敏度 (重要)")
-min_area = st.sidebar.slider("最小面積 (數字不見調這裡)", 10, 500, 50, help="【最重要】如果你寫的字不見了，請把這個數值「往左拉」！如果雜訊太多，請「往右拉」。")
+min_area = st.sidebar.slider("最小面積 (數字不見調這裡)", 10, 500, 50)
 min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
 show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
 def run_app(source_image):
-    # 移除 use_smart_logic 和 temperature 參數
-    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, dilation_iter, use_morph_close, show_debug)
+    result_img, info_list = process_and_predict(source_image, min_area, min_density, min_confidence, box_padding, proc_mode_sel, manual_thresh, dilation_iter, use_morph_close, merge_dist, show_debug)
     
     c1, c2 = st.columns([3, 2])
     
@@ -222,7 +272,6 @@ def run_app(source_image):
                         st.caption(f"#{item['id']}")
                         st.image(item['roi_img'], width=50)
                     with cols[1]:
-                        # 移除「邏輯修正」的 delta 顯示
                         st.metric("數字", item['digit'])
                     with cols[2]:
                         conf = item['confidence']
@@ -234,10 +283,9 @@ def run_app(source_image):
             st.info("""
             **💡 小撇步：如何找回消失的字？**
             
-            請嘗試調整左邊側邊欄的設定：
             1. 📉 **調低「最小面積」** (試試看 20 或 30)
-            2. 🐡 **調大「筆畫膨脹」** (試試看 2 或 3)
-            3. 🖼️ 檢查 **影像處理模式** 是否選對 (拍照請選「拍照模式」)
+            2. 🧲 **調大「斷字合併」** (把斷掉的字吸在一起)
+            3. 🐡 **調大「筆畫膨脹」**
             """)
 
 # 介面渲染
