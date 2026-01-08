@@ -11,7 +11,7 @@ import math
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V55 Tracking)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V56 Strict)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -30,11 +30,10 @@ cnn_model = load_model()
 # ==========================================
 #              狀態管理 (追蹤器)
 # ==========================================
-# 初始化 Session State 來記住 ID
 if 'tracker' not in st.session_state:
     st.session_state.tracker = {
-        'next_id': 1,       # 下一個要發的號碼牌
-        'objects': []       # 目前畫面上的物件 [{'id': 1, 'center': (x, y)}, ...]
+        'next_id': 1,       
+        'objects': []       
     }
 
 def reset_tracker():
@@ -87,57 +86,42 @@ def merge_nearby_boxes(boxes, threshold=20):
     merged.append(current_box)
     return merged
 
-# [V55] ID 追蹤演算法
 def update_tracker(current_boxes_coords):
-    """
-    比較新的框框和舊的框框，決定 ID 是要沿用還是新增
-    """
     tracked_objects = st.session_state.tracker['objects']
     next_id = st.session_state.tracker['next_id']
-    
     new_tracked_objects = []
-    assigned_ids = [] # 用來存這回合已經發出去的 ID
-
-    # 1. 為每個新偵測到的框框，尋找是否是「舊朋友」
+    assigned_ids = [] 
     final_ids_for_boxes = []
 
     for box in current_boxes_coords:
         x, y, w, h = box
         cx, cy = x + w/2, y + h/2
-        
         best_match_id = None
         min_dist = 999999
-        
-        # 尋找最近的舊物件
         for old_obj in tracked_objects:
             ox, oy = old_obj['center']
             dist = math.sqrt((cx - ox)**2 + (cy - oy)**2)
-            
-            # 如果距離夠近 (例如小於 50 像素)，且這個 ID 還沒被這一輪的其他框框搶走
             if dist < 50 and old_obj['id'] not in assigned_ids:
                 if dist < min_dist:
                     min_dist = dist
                     best_match_id = old_obj['id']
         
         if best_match_id is not None:
-            # 找到了！沿用舊 ID
             final_id = best_match_id
             assigned_ids.append(final_id)
         else:
-            # 沒找到，這是新朋友，發新號碼牌
             final_id = next_id
             next_id += 1
             
         final_ids_for_boxes.append(final_id)
         new_tracked_objects.append({'id': final_id, 'center': (cx, cy)})
     
-    # 更新 Session State
     st.session_state.tracker['objects'] = new_tracked_objects
     st.session_state.tracker['next_id'] = next_id
-    
     return final_ids_for_boxes
 
-def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, use_morph_close, merge_dist, use_tracking, show_debug):
+# [V56] 新增 use_strict_filter 參數
+def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, use_morph_close, merge_dist, use_tracking, use_strict_filter, show_debug):
     result_img = image_bgr.copy()
     h_img_full, w_img_full = result_img.shape[:2]
     
@@ -173,6 +157,15 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
     for i in range(1, nb):
         x, y, w, h = stats_cc[i, :4]
         if x <= 1 or y <= 1 or (x + w) >= binary_proc.shape[1] - 1 or (y + h) >= binary_proc.shape[0] - 1: continue
+        
+        # [V56] 幾何形狀過濾 (第一關：長寬比)
+        # 數字通常長寬比會在 0.2 ~ 2.0 之間
+        # 如果太寬 (> 3.0) 或是太細長 (< 0.1)，很有可能是塗鴉線條
+        if use_strict_filter:
+            aspect_ratio = w / float(h)
+            if aspect_ratio > 2.5 or aspect_ratio < 0.15:
+                continue
+
         raw_boxes.append([x, y, w, h])
 
     if merge_dist > 0:
@@ -180,15 +173,12 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
     else:
         processing_boxes = raw_boxes
 
-    # [V55] 這裡決定是否要使用 Tracking
-    # 如果是上傳圖片模式，我們還是強制由左到右排序 (因為沒有時間順序)
-    # 如果是手寫板且開啟追蹤，我們就不排序，而是靠 Tracker 決定 ID
     if not use_tracking:
-        processing_boxes.sort(key=lambda b: b[0]) # 預設：由左至右
+        processing_boxes.sort(key=lambda b: b[0])
 
     rois_to_pred = []
     coords_to_draw = []
-    valid_boxes = [] # 暫存通過過濾的框，給 Tracker 用
+    valid_boxes = [] 
 
     for box in processing_boxes:
         x, y, w, h = box
@@ -217,12 +207,10 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         coords_to_draw.append((x, y, w, h))
         valid_boxes.append([x, y, w, h])
 
-    # [V55] 取得 ID (有追蹤 或 沒追蹤)
     final_ids = []
     if use_tracking:
         final_ids = update_tracker(valid_boxes)
     else:
-        # 如果沒追蹤，就是依照排序給 1, 2, 3...
         final_ids = list(range(1, len(valid_boxes) + 1))
 
     detected_info = []
@@ -235,16 +223,20 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             confidence = np.max(pred_probs)
             rx, ry, w, h = coords_to_draw[i]
             
-            # [V55] 這裡的 ID 來自 Tracker
-            current_id = final_ids[i] 
+            # [V56] 信心過濾 (第二關)
+            # 如果開啟嚴格過濾，我們強制忽略信心度低於 0.85 的東西 (即使滑桿設得很低)
+            threshold = min_confidence
+            if use_strict_filter:
+                threshold = max(0.85, min_confidence) # 取較高者，確保至少 0.85
 
-            if confidence < min_confidence:
+            if confidence < threshold:
                 continue
+
+            current_id = final_ids[i] 
 
             roi_display = cv2.cvtColor(binary_proc[ry:ry+h, rx:rx+w], cv2.COLOR_GRAY2RGB)
             roi_display = cv2.bitwise_not(roi_display)
 
-            # 把資料存下來，但要先依照 ID 排序，方便右側顯示
             detected_info.append({
                 "id": current_id,
                 "digit": str(res_id), 
@@ -253,7 +245,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             })
             
             label = f"#{current_id}"
-            
             pad = box_padding
             p_x1 = max(0, rx - pad)
             p_y1 = max(0, ry - pad)
@@ -263,7 +254,6 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
             cv2.rectangle(result_img, (p_x1, p_y1), (p_x2, p_y2), (0, 255, 0), 2)
             cv2.putText(result_img, label, (p_x1, p_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
-    # 最後依照 ID 大小排序列表，讓 #1 在最上面
     detected_info.sort(key=lambda x: x['id'])
             
     return result_img, detected_info
@@ -271,12 +261,11 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V55 Tracking)")
+st.title("🔢 AI 手寫辨識 (V56 Strict)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
 
-# 如果切換模式，重置追蹤器
 if 'last_mode' not in st.session_state:
     st.session_state.last_mode = mode_option
 if st.session_state.last_mode != mode_option:
@@ -312,7 +301,10 @@ if enable_merge:
     merge_dist = st.sidebar.slider("合併距離 (像素)", 5, 50, 20)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🤖 辨識設定")
+st.sidebar.subheader("🛡️ 過濾設定")
+# [V56] 新增嚴格過濾開關
+use_strict_filter = st.sidebar.checkbox("🛡️ 過濾塗鴉與非數字", value=True, help="開啟後，如果 AI 信心不足 (低於 85%) 或是形狀怪異的圖案，將不會被顯示。適合用來過濾亂畫的圖。")
+
 min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
 
 st.sidebar.subheader("🎛️ 靈敏度 (重要)")
@@ -324,7 +316,7 @@ def run_app(source_image, use_tracking=False):
     result_img, info_list = process_and_predict(
         source_image, min_area, min_density, min_confidence, box_padding, 
         proc_mode_sel, manual_thresh, dilation_iter, use_morph_close, merge_dist, 
-        use_tracking, show_debug
+        use_tracking, use_strict_filter, show_debug
     )
     
     c1, c2 = st.columns([3, 2])
@@ -335,7 +327,6 @@ def run_app(source_image, use_tracking=False):
     with c2:
         if info_list:
             st.success(f"✅ 找到 {len(info_list)} 個數字")
-            # 重設按鈕
             if use_tracking:
                 if st.button("🔄 清除編號記憶 (Reset ID)"):
                     reset_tracker()
@@ -356,7 +347,11 @@ def run_app(source_image, use_tracking=False):
                         st.progress(conf)
                     st.divider()
         else:
-            st.warning("⚠️ 畫面中未發現數字！")
+            if use_strict_filter:
+                st.warning("⚠️ 未發現數字 (已開啟嚴格過濾)")
+                st.info("如果是正常的數字被過濾掉了，請嘗試關閉「🛡️ 過濾塗鴉與非數字」。")
+            else:
+                st.warning("⚠️ 畫面中未發現數字！")
 
 # 介面渲染
 if mode_option == "✍️ 手寫板":
@@ -377,15 +372,12 @@ if mode_option == "✍️ 手寫板":
         if np.max(canvas_result.image_data) > 0:
             img_data = canvas_result.image_data.astype(np.uint8)
             img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGBA2BGR)
-            # [V55] 手寫板開啟 ID 追蹤
             run_app(img_bgr, use_tracking=True)
         else:
-            # 畫布全黑時重置
             reset_tracker()
             st.info("請在畫布上寫字...")
 
 elif mode_option in ["📷 拍照辨識", "📂 上傳圖片"]:
-    # [V55] 圖片模式不開啟追蹤 (因為圖片沒有時間順序)，依然使用左到右排序
     if mode_option == "📷 拍照辨識":
         file = st.camera_input("拍照")
     else:
