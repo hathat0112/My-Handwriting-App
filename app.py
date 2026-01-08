@@ -11,7 +11,7 @@ import math
 # ==========================================
 #              設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V61 Crop)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫數字辨識 (V63 Auto-Filter)", page_icon="🔢", layout="wide")
 
 MODEL_FILE = "cnn_model_robust.h5"
 
@@ -181,11 +181,9 @@ def filter_by_consistency(boxes, use_consistency):
             filtered_boxes.append(box)
     return filtered_boxes
 
-# [V61] process_and_predict 接收裁切參數 crop_params
+# [V63] 移除了 max_area 參數，直接內建邏輯
 def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, use_morph_close, merge_dist, use_tracking, use_strict_filter, use_consistency, top_k, crop_params, show_debug):
     
-    # [V61] 執行裁切
-    # crop_params = (top_pct, bottom_pct, left_pct, right_pct)
     h_orig, w_orig = image_bgr.shape[:2]
     top_p, bottom_p, left_p, right_p = crop_params
     
@@ -194,19 +192,17 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
     x1 = int(w_orig * left_p / 100)
     x2 = int(w_orig * (100 - right_p) / 100)
     
-    # 確保座標合理
     if x2 <= x1 or y2 <= y1:
         return image_bgr, []
 
-    # 裁切圖片
     cropped_img = image_bgr[y1:y2, x1:x2].copy()
     
-    # 如果裁切後太小，就不要處理了
     if cropped_img.shape[0] < 10 or cropped_img.shape[1] < 10:
         return image_bgr, []
 
-    # --- 以下邏輯都對 cropped_img 進行 ---
     h_img_full, w_img_full = cropped_img.shape[:2]
+    # [V63] 計算整張圖的面積，用來做動態過濾
+    total_image_area = h_img_full * w_img_full
     
     gray = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -225,10 +221,8 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
         binary_proc = thresh
 
     if use_strict_filter:
-        # 嚴格模式下，依然保留邊緣清除，但範圍基於裁切後的圖
         margin_x = int(w_img_full * 0.05)
         margin_y = int(h_img_full * 0.05)
-        # 簡單的塗黑邊緣
         cv2.rectangle(binary_proc, (0, 0), (w_img_full, margin_y), 0, -1)
         cv2.rectangle(binary_proc, (0, h_img_full-margin_y), (w_img_full, h_img_full), 0, -1)
         cv2.rectangle(binary_proc, (0, 0), (margin_x, h_img_full), 0, -1)
@@ -249,6 +243,13 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
     raw_boxes = []
     for i in range(1, nb):
         x, y, w, h = stats_cc[i, :4]
+        
+        # [V63] 自動最大面積過濾
+        # 如果單一框框佔了整張圖的 60% 以上，直接當作是背景雜訊
+        box_area = w * h
+        if box_area > (total_image_area * 0.6):
+            continue
+
         if x <= 2 or y <= 2 or (x + w) >= w_img_full - 2 or (y + h) >= h_img_full - 2: continue
         if use_strict_filter:
             aspect_ratio = w / float(h)
@@ -271,6 +272,9 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 
     for box in processing_boxes:
         x, y, w, h = box
+        
+        # 合併後也要檢查一次，不能大於 60%
+        if (w * h) > (total_image_area * 0.6): continue
         if w * h < min_area: continue
 
         sub_roi = binary_proc[y:y+h, x:x+w]
@@ -331,18 +335,13 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
     if top_k > 0:
         candidates = candidates[:top_k]
 
-    # --- 繪製結果回到原圖上 ---
     result_img_display = image_bgr.copy()
-    
-    # 畫出裁切區域框框 (讓使用者知道他切了哪裡)
-    cv2.rectangle(result_img_display, (x1, y1), (x2, y2), (255, 0, 0), 2) # 藍色框表示關注區域
+    cv2.rectangle(result_img_display, (x1, y1), (x2, y2), (255, 0, 0), 2) 
 
     detected_info = []
     for cand in candidates:
         i = cand['box_idx']
         rx, ry, w, h = cand['coord']
-        
-        # 轉換座標：裁切圖座標 -> 原圖座標
         orig_x = x1 + rx
         orig_y = y1 + ry
         
@@ -373,7 +372,7 @@ def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_pa
 # ==========================================
 #              Streamlit UI 介面
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V61 Crop)")
+st.title("🔢 AI 手寫辨識 (V63 Auto-Filter)")
 
 st.sidebar.header("🔧 設定")
 mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
@@ -385,15 +384,12 @@ if st.session_state.last_mode != mode_option:
     st.session_state.last_mode = mode_option
 
 st.sidebar.markdown("---")
-# [V61] 新增裁切區域設定
-with st.sidebar.expander("✂️ 手動裁切區域 (關注設定)", expanded=True):
-    st.info("拖拉滑桿來忽略邊緣的字幕或雜訊")
+with st.sidebar.expander("✂️ 手動裁切區域 (關注設定)", expanded=False):
     col_t, col_b = st.columns(2)
     with col_t:
         top_crop = st.slider("頂部裁切 %", 0, 50, 0)
     with col_b:
         bottom_crop = st.slider("底部裁切 %", 0, 50, 0)
-        
     col_l, col_r = st.columns(2)
     with col_l:
         left_crop = st.slider("左側裁切 %", 0, 50, 0)
@@ -435,13 +431,16 @@ if enable_merge:
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 靈敏度")
 min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.40) 
-min_area = st.sidebar.slider("最小面積", 10, 500, 100)
+
+# [V63] 移除了 Max Area 滑桿，改為自動內建
+min_area = st.sidebar.slider("最小面積 (過濾小雜訊)", 10, 500, 50)
 min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
 show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
 
 def run_app(source_image, use_tracking=False):
     crop_params = (top_crop, bottom_crop, left_crop, right_crop)
     
+    # 移除 max_area 參數傳遞
     result_img, info_list = process_and_predict(
         source_image, min_area, min_density, min_confidence, box_padding, 
         proc_mode_sel, manual_thresh, dilation_iter, use_morph_close, merge_dist, 
@@ -451,7 +450,7 @@ def run_app(source_image, use_tracking=False):
     c1, c2 = st.columns([3, 2])
     
     with c1:
-        st.image(result_img, channels="BGR", use_container_width=True, caption="辨識結果 (藍框=關注區域)")
+        st.image(result_img, channels="BGR", use_container_width=True, caption="辨識結果")
     
     with c2:
         if info_list:
@@ -478,7 +477,7 @@ def run_app(source_image, use_tracking=False):
         else:
             if use_strict_filter:
                 st.warning("⚠️ 未發現數字")
-                st.info("請嘗試調整裁切區域，或關閉嚴格過濾。")
+                st.info("系統已自動過濾過大或過小的雜訊。")
             else:
                 st.warning("⚠️ 畫面中未發現數字！")
 
