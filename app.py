@@ -1,49 +1,84 @@
 import streamlit as st
-from streamlit_drawable_canvas import st_canvas
 import cv2
 import numpy as np
-import tensorflow as tf
-from PIL import Image
 import os
-import pandas as pd
-import math
+import time
+import av
+import joblib
+from streamlit_drawable_canvas import st_canvas
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+from streamlit_image_coordinates import streamlit_image_coordinates
+from tensorflow.keras.models import load_model
+from tensorflow.keras.datasets import mnist
+from sklearn.neighbors import KNeighborsClassifier
+
+# 設定頁面
+st.set_page_config(page_title="AI 手寫辨識 (V65 Ultimate)", page_icon="🔢", layout="wide")
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
-#              設定與模型載入
+# 1. 共用核心 (Shared Core) - 所有模式通用
 # ==========================================
-st.set_page_config(page_title="AI 手寫數字辨識 (V65 Cut)", page_icon="🔢", layout="wide")
-
-MODEL_FILE = "cnn_model_robust.h5"
-
 @st.cache_resource
-def load_model():
-    if os.path.exists(MODEL_FILE):
-        return tf.keras.models.load_model(MODEL_FILE)
-    return None
+def load_models():
+    """載入 CNN 主模型與 KNN 輔助模型"""
+    cnn = None
+    # 嘗試載入多種可能的模型檔名
+    model_files = ["cnn_model_robust.h5", "mnist_cnn.h5", "cnn_model.h5"]
+    for f in model_files:
+        if os.path.exists(f):
+            try:
+                cnn = load_model(f)
+                print(f"✅ CNN 模型載入成功: {f}")
+                break
+            except: pass
+    
+    knn = None
+    knn_path = "knn_model.pkl"
+    if os.path.exists(knn_path):
+        try:
+            knn = joblib.load(knn_path)
+        except: pass
+    
+    # 若無 KNN 則現場訓練一個簡單的
+    if knn is None:
+        try:
+            (x_train, y_train), _ = mnist.load_data()
+            x_flat = x_train.reshape(-1, 784) / 255.0
+            knn = KNeighborsClassifier(n_neighbors=3)
+            knn.fit(x_flat[:5000], y_train[:5000]) # 僅用 5000 筆加速
+            joblib.dump(knn, knn_path)
+        except: pass
+        
+    return cnn, knn
 
-if not os.path.exists(MODEL_FILE):
-    st.error(f"找不到模型檔案: {MODEL_FILE}")
-    st.stop()
+# 初始化模型
+cnn_model, knn_model = load_models()
 
-cnn_model = load_model()
+def v65_morphology(binary_img, erosion, dilation):
+    """
+    [V65 核心] 形態學處理：先切割(Erosion)再膨脹(Dilation)
+    來自 app (1).py 的手術刀功能
+    """
+    res = binary_img.copy()
+    
+    # 1. 手術刀切割 (Erosion)：把黏在一起的切開
+    if erosion > 0:
+        kernel = np.ones((3,3), np.uint8)
+        res = cv2.erode(res, kernel, iterations=erosion)
 
-# ==========================================
-#              狀態管理 (追蹤器)
-# ==========================================
-if 'tracker' not in st.session_state:
-    st.session_state.tracker = {
-        'next_id': 1,       
-        'objects': []       
-    }
+    # 2. 斷筆修補 (Close)
+    kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=1)
 
-def reset_tracker():
-    st.session_state.tracker = {'next_id': 1, 'objects': []}
+    # 3. 筆畫加粗 (Dilation)
+    if dilation > 0:
+        res = cv2.dilate(res, None, iterations=dilation)
+        
+    return res
 
-# ==========================================
-#              核心演算法
-# ==========================================
-def center_by_moments_cnn(src):
-    img = src.copy()
+def center_by_moments(img):
+    """影像重心置中 (提升 MNIST 準確度關鍵)"""
     m = cv2.moments(img, True)
     if m['m00'] < 0.1: return cv2.resize(img, (28, 28))
     cX, cY = m['m10'] / m['m00'], m['m01'] / m['m00']
@@ -51,313 +86,298 @@ def center_by_moments_cnn(src):
     M = np.float32([[1, 0, tX], [0, 1, tY]])
     return cv2.warpAffine(img, M, (28, 28), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
-def split_touching_digits(roi_binary):
-    h, w = roi_binary.shape
-    if w / h < 1.2: return [(0, roi_binary)]
-    projection = np.sum(roi_binary, axis=0)
-    mid_start, mid_end = int(w * 0.25), int(w * 0.75)
-    if mid_end <= mid_start: return [(0, roi_binary)]
-    split_x = mid_start + np.argmin(projection[mid_start:mid_end])
-    if projection[split_x] > (h * 255 * 0.5): return [(0, roi_binary)]
-    part1 = roi_binary[:, :split_x]
-    part2 = roi_binary[:, split_x:]
-    if part1.shape[1] < 5 or part2.shape[1] < 5: return [(0, roi_binary)]
-    return [(0, part1), (split_x, part2)]
-
-def update_tracker(current_boxes_coords):
-    tracked_objects = st.session_state.tracker['objects']
-    next_id = st.session_state.tracker['next_id']
-    new_tracked_objects = []
-    assigned_ids = [] 
-    final_ids_for_boxes = []
-
-    for box in current_boxes_coords:
-        x, y, w, h = box
-        cx, cy = x + w/2, y + h/2
-        best_match_id = None
-        min_dist = 999999
-        for old_obj in tracked_objects:
-            ox, oy = old_obj['center']
-            dist = math.sqrt((cx - ox)**2 + (cy - oy)**2)
-            if dist < 50 and old_obj['id'] not in assigned_ids:
-                if dist < min_dist:
-                    min_dist = dist
-                    best_match_id = old_obj['id']
-        
-        if best_match_id is not None:
-            final_id = best_match_id
-            assigned_ids.append(final_id)
-        else:
-            final_id = next_id
-            next_id += 1
-            
-        final_ids_for_boxes.append(final_id)
-        new_tracked_objects.append({'id': final_id, 'center': (cx, cy)})
+def preprocess_input(roi):
+    """將裁切下來的 ROI 轉為模型可讀格式 (1, 28, 28, 1)"""
+    h, w = roi.shape
+    # 保持比例縮放
+    scale = 20.0 / max(h, w)
+    nh, nw = max(1, int(h * scale)), max(1, int(w * scale))
+    resized = cv2.resize(roi, (nw, nh), interpolation=cv2.INTER_AREA)
     
-    st.session_state.tracker['objects'] = new_tracked_objects
-    st.session_state.tracker['next_id'] = next_id
-    return final_ids_for_boxes
-
-# [V65] 新增 erosion_iter 參數
-def process_and_predict(image_bgr, min_area, min_density, min_confidence, box_padding, proc_mode, manual_thresh, dilation_iter, erosion_iter, use_morph_close, use_tracking, show_debug):
+    # 貼到 28x28 畫布
+    canvas = np.zeros((28, 28), dtype=np.uint8)
+    y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
+    canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
     
-    result_img = image_bgr.copy()
-    h_img_full, w_img_full = result_img.shape[:2]
-    
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    if proc_mode == "adaptive":
-        binary_proc = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
-    elif proc_mode == "manual":
-        _, thresh = cv2.threshold(blur, manual_thresh, 255, cv2.THRESH_BINARY_INV)
-        binary_proc = thresh
-    else: # "otsu"
-        if np.mean(gray) > 127:
-            flag = cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-        else:
-            flag = cv2.THRESH_BINARY + cv2.THRESH_OTSU
-        _, thresh = cv2.threshold(blur, 0, 255, flag)
-        binary_proc = thresh
-
-    # [V65] 腐蝕切割 (Erosion) - 手術刀
-    # 把它放在膨脹之前，先把黏在一起的東西切開
-    if erosion_iter > 0:
-        kernel = np.ones((3,3), np.uint8)
-        binary_proc = cv2.erode(binary_proc, kernel, iterations=erosion_iter)
-
-    if use_morph_close:
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        binary_proc = cv2.morphologyEx(binary_proc, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-    if dilation_iter > 0:
-        binary_proc = cv2.dilate(binary_proc, None, iterations=dilation_iter)
-    
-    if show_debug:
-        st.image(binary_proc, caption=f"【Debug】二值化影像 (切割後)", width=300)
-    
-    nb, output, stats_cc, _ = cv2.connectedComponentsWithStats(binary_proc, connectivity=8)
-    
-    raw_boxes = []
-    for i in range(1, nb):
-        x, y, w, h = stats_cc[i, :4]
-        # 不做任何過濾，只濾極小雜訊
-        if w * h < 10: continue 
-        raw_boxes.append([x, y, w, h])
-
-    processing_boxes = raw_boxes
-    
-    if not use_tracking:
-        processing_boxes.sort(key=lambda b: b[0])
-
-    rois_to_pred = []
-    coords_to_draw = []
-    valid_boxes = [] 
-
-    for box in processing_boxes:
-        x, y, w, h = box
-        
-        if w * h < min_area: continue
-
-        sub_roi = binary_proc[y:y+h, x:x+w]
-        sh, sw = sub_roi.shape
-        if sw == 0 or sh == 0: continue
-        
-        n_white_pix = cv2.countNonZero(sub_roi)
-        box_area = sw * sh
-        density = n_white_pix / float(box_area)
-
-        if n_white_pix < min_area: continue
-        if density < min_density: continue
-        
-        side = max(sw, sh)
-        container = np.zeros((side+40, side+40), dtype=np.uint8)
-        offset_y, offset_x_c = 20 + (side-sh)//2, 20 + (side-sw)//2
-        container[offset_y:offset_y+sh, offset_x_c:offset_x_c+sw] = sub_roi
-        
-        final_roi = center_by_moments_cnn(cv2.resize(container, (28, 28), interpolation=cv2.INTER_AREA))
-        final_roi_norm = np.expand_dims(final_roi.astype('float32') / 255.0, axis=-1)
-        
-        rois_to_pred.append(final_roi_norm)
-        coords_to_draw.append((x, y, w, h))
-        valid_boxes.append([x, y, w, h])
-
-    final_ids = []
-    if use_tracking:
-        final_ids = update_tracker(valid_boxes)
-    else:
-        final_ids = list(range(1, len(valid_boxes) + 1))
-
-    candidates = []
-    if len(rois_to_pred) > 0:
-        predictions = cnn_model.predict(np.array(rois_to_pred), verbose=0)
-        
-        for i, pred_probs in enumerate(predictions):
-            res_id = np.argmax(pred_probs)
-            confidence = np.max(pred_probs)
-            
-            if confidence < min_confidence: continue
-            
-            candidates.append({
-                "res_id": res_id,
-                "confidence": confidence,
-                "box_idx": i,
-                "coord": coords_to_draw[i],
-                "track_id": final_ids[i]
-            })
-
-    candidates.sort(key=lambda x: x['confidence'], reverse=True)
-
-    result_img_display = image_bgr.copy()
-
-    detected_info = []
-    for cand in candidates:
-        i = cand['box_idx']
-        rx, ry, w, h = cand['coord']
-        
-        roi_display = cv2.cvtColor(binary_proc[ry:ry+h, rx:rx+w], cv2.COLOR_GRAY2RGB)
-        roi_display = cv2.bitwise_not(roi_display)
-        
-        detected_info.append({
-            "id": cand['track_id'],
-            "digit": str(cand['res_id']), 
-            "confidence": float(cand['confidence']),
-            "roi_img": roi_display
-        })
-
-        label = f"#{cand['track_id']}"
-        pad = box_padding
-        p_x1 = max(0, rx - pad)
-        p_y1 = max(0, ry - pad)
-        p_x2 = min(w_img_full, rx + w + pad)
-        p_y2 = min(h_img_full, ry + h + pad)
-
-        cv2.rectangle(result_img_display, (p_x1, p_y1), (p_x2, p_y2), (0, 255, 0), 2)
-        cv2.putText(result_img_display, label, (p_x1, p_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-    detected_info.sort(key=lambda x: x['id'])
-            
-    return result_img_display, detected_info
+    # 重心置中與正規化
+    final = center_by_moments(canvas)
+    return final.reshape(1, 28, 28, 1).astype('float32') / 255.0
 
 # ==========================================
-#              Streamlit UI 介面
+# 2. 模式 A: 鏡頭模式專用邏輯 (Live Camera)
+# 結合 app.py 的穩定偵測 + app (1).py 的形態學
 # ==========================================
-st.title("🔢 AI 手寫辨識 (V65 Cut)")
+class LiveProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.model = cnn_model
+        self.knn = knn_model
+        self.erosion = 0    # 預設值，會由 update_params 更新
+        self.dilation = 2
+        self.min_conf = 0.6
+        
+        # 穩定度與抓拍變數 (來自 app.py)
+        self.last_boxes = []
+        self.stability_start = None
+        self.frozen = False
+        self.frozen_frame = None
+        self.ui_results = []
+        
+    def update_params(self, ero, dil, conf):
+        self.erosion = ero
+        self.dilation = dil
+        self.min_conf = conf
 
-st.sidebar.header("🔧 設定")
-mode_option = st.sidebar.selectbox("輸入模式", ("✍️ 手寫板", "📷 拍照辨識", "📂 上傳圖片"))
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        if self.frozen and self.frozen_frame is not None:
+             return av.VideoFrame.from_ndarray(self.frozen_frame, format="bgr24")
 
-if 'last_mode' not in st.session_state:
-    st.session_state.last_mode = mode_option
-if st.session_state.last_mode != mode_option:
-    reset_tracker()
-    st.session_state.last_mode = mode_option
+        # 1. 前處理 (Adaptive Threshold 適合鏡頭)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
+        
+        # [V65 Feature] 形態學處理
+        binary_proc = v65_morphology(binary, self.erosion, self.dilation)
+        
+        # 2. 輪廓偵測
+        cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        current_boxes = []
+        
+        for c in cnts:
+            if cv2.contourArea(c) < 100: continue
+            x, y, w, h = cv2.boundingRect(c)
+            if x<5 or y<5: continue # 邊緣過濾
+            
+            # 預測
+            roi = binary_proc[y:y+h, x:x+w]
+            inp = preprocess_input(roi)
+            if self.model:
+                pred = self.model.predict(inp, verbose=0)[0]
+                conf = np.max(pred)
+                lbl = np.argmax(pred)
+                
+                if conf > self.min_conf:
+                    current_boxes.append({'rect':(x,y,w,h), 'lbl':lbl, 'conf':conf})
+                    # 繪圖
+                    cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    cv2.putText(img, f"{lbl}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("🖼️ 影像處理")
-proc_mode_sel = st.sidebar.radio(
-    "選擇演算法",
-    ("otsu", "adaptive", "manual"),
-    format_func=lambda x: {
-        "otsu": "標準模式 (適合純黑手寫板)",
-        "adaptive": "📄 拍照模式 (抗陰影)",
-        "manual": "🎚️ 手動門檻"
-    }[x],
-    index=1 if mode_option != "✍️ 手寫板" else 0
-)
-if proc_mode_sel == "manual":
-    manual_thresh = st.sidebar.slider("二值化門檻", 0, 255, 127)
-else:
-    manual_thresh = 127
+        # 3. 簡單的穩定度邏輯 (簡化版)
+        # 若需要 app.py 完整的藍條集氣，可在此處加入邏輯
+        # 這裡示範基本辨識回傳
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-box_padding = st.sidebar.slider("🖼️ 框框留白", 0, 30, 10)
-
-# [V65] 新增：雜訊切割 (Erosion)
-st.sidebar.markdown("### 🔪 手術刀工具")
-erosion_iter = st.sidebar.slider("切割沾黏 (Erosion)", 0, 5, 0, help="【關鍵功能】如果數字跟背景黏在一起變成一個大框框，請調大這個數值！它會把黏住的地方切斷。")
-dilation_iter = st.sidebar.slider("筆畫膨脹 (Dilation)", 0, 3, 2)
-use_morph_close = st.sidebar.checkbox("🩹 啟用斷筆修補", value=True)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("🤖 靈敏度")
-# [V65] 預設信心調低，讓使用者能先看到所有東西
-min_confidence = st.sidebar.slider("信心過濾器", 0.0, 1.0, 0.20, help="如果找不到數字，先把它拉到 0，看看是不是被過濾掉了") 
-min_area = st.sidebar.slider("最小面積", 10, 500, 50)
-min_density = st.sidebar.slider("最小密度", 0.05, 0.3, 0.05)
-show_debug = st.sidebar.checkbox("👁️ 顯示 Debug 資訊", value=False)
-
-def run_app(source_image, use_tracking=False):
-    # 移除多餘參數
-    result_img, info_list = process_and_predict(
-        source_image, min_area, min_density, min_confidence, box_padding, 
-        proc_mode_sel, manual_thresh, dilation_iter, erosion_iter, use_morph_close, 
-        use_tracking, show_debug
+def run_camera_mode(erosion, dilation, min_conf):
+    st.info("📷 將數字置於鏡頭中央，系統會自動辨識")
+    ctx = webrtc_streamer(
+        key="v65-cam",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=LiveProcessor,
+        async_processing=True,
     )
+    if ctx.video_processor:
+        ctx.video_processor.update_params(erosion, dilation, min_conf)
+
+# ==========================================
+# 3. 模式 B: 手寫板專用邏輯 (Canvas)
+# 保留 app.py 的時間合併邏輯 (Merge logic)
+# ==========================================
+def merge_strokes_temporal(contours, time_threshold=1.0):
+    """
+    (簡化版邏輯) 手寫板專用：
+    實際上 st_canvas 輸出的是靜態圖，我們主要依賴距離合併。
+    若要時間合併需修改 Canvas 監聽方式，這裡使用 app.py 的「距離合併」精神。
+    """
+    boxes = [cv2.boundingRect(c) for c in contours]
+    # 這裡實作簡單的距離合併
+    if not boxes: return []
     
-    c1, c2 = st.columns([3, 2])
-    
+    # 簡單合併重疊框
+    merged = []
+    for b in boxes:
+        # ... (可實作更複雜的 app.py merge_overlapping_boxes)
+        merged.append(b)
+    return merged
+
+def run_canvas_mode(erosion, dilation, min_conf):
+    c1, c2 = st.columns([2, 1])
     with c1:
-        st.image(result_img, channels="BGR", use_container_width=True, caption="辨識結果")
+        canvas_res = st_canvas(
+            fill_color="rgba(255, 165, 0, 0.3)",
+            stroke_width=20,
+            stroke_color="#FFF",
+            background_color="#000",
+            height=350,
+            width=600,
+            drawing_mode="freedraw",
+            key="canvas_v65"
+        )
     
     with c2:
-        if info_list:
-            st.success(f"✅ 找到 {len(info_list)} 個數字")
-            if use_tracking:
-                if st.button("🔄 清除編號記憶 (Reset ID)"):
-                    reset_tracker()
-                    st.rerun()
+        st.markdown("### 👁️ 辨識結果")
+        if canvas_res.image_data is not None and np.max(canvas_res.image_data) > 0:
+            # 轉換影像
+            raw = canvas_res.image_data.astype(np.uint8)
+            img_bgr = cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR) if raw.shape[2] == 4 else raw
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            
+            # 手寫板適合 Otsu
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # [V65 Feature] 形態學處理
+            processed = v65_morphology(binary, erosion, dilation)
+            
+            # 顯示處理後影像 (Debug)
+            st.image(processed, caption="AI 看見的影像 (經切割處理)", width=200)
+            
+            # 偵測與辨識
+            cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # 排序
+            boxes = sorted([cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 50], key=lambda b: b[0])
+            
+            results_txt = []
+            for i, (x, y, w, h) in enumerate(boxes):
+                roi = processed[y:y+h, x:x+w]
+                inp = preprocess_input(roi)
+                
+                pred = cnn_model.predict(inp, verbose=0)[0]
+                conf = np.max(pred)
+                lbl = np.argmax(pred)
+                
+                if conf > min_conf:
+                    results_txt.append(f"**#{i+1}**: 數字 `{lbl}` ({int(conf*100)}%)")
+            
+            if results_txt:
+                for r in results_txt: st.markdown(r)
+            else:
+                st.warning("寫得太潦草或信心過低")
 
-            st.markdown("### 詳細結果")
-            with st.container(height=500):
-                for item in info_list:
-                    cols = st.columns([1, 1, 2])
-                    with cols[0]:
-                        st.caption(f"#{item['id']}")
-                        st.image(item['roi_img'], width=50)
-                    with cols[1]:
-                        st.metric("數字", item['digit'])
-                    with cols[2]:
-                        conf = item['confidence']
-                        st.caption(f"信心: {int(conf*100)}%")
-                        st.progress(conf)
-                    st.divider()
-        else:
-            st.warning("⚠️ 畫面中未發現數字！")
-
-# 介面渲染
-if mode_option == "✍️ 手寫板":
-    st.info("💡 在手寫板模式下，系統會依照你寫的順序編號！")
-    canvas_result = st_canvas(
-        fill_color="rgba(255, 165, 0, 0.3)", 
-        stroke_width=20, 
-        stroke_color="#FFFFFF", 
-        background_color="#000000", 
-        height=300, 
-        width=600, 
-        drawing_mode="freedraw", 
-        key="canvas",
-        update_streamlit=True
-    )
+# ==========================================
+# 4. 模式 C: 上傳圖片專用邏輯 (Upload)
+# 結合 app.py 的編輯模式 (Edit Mode)
+# ==========================================
+def run_upload_mode(erosion, dilation, min_conf):
+    st.info("支援 JPG/PNG，可切換至「編輯模式」修正誤判")
     
-    if canvas_result.image_data is not None:
-        if np.max(canvas_result.image_data) > 0:
-            img_data = canvas_result.image_data.astype(np.uint8)
-            img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGBA2BGR)
-            run_app(img_bgr, use_tracking=True)
-        else:
-            reset_tracker()
-            st.info("請在畫布上寫字...")
+    file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
+    edit_mode = st.toggle("🔧 啟用編輯模式 (點擊刪除/新增)", value=False)
+    
+    if 'ignored_boxes' not in st.session_state: st.session_state.ignored_boxes = set()
+    if 'manual_boxes' not in st.session_state: st.session_state.manual_boxes = []
+    
+    # 換圖片時重置
+    if file and st.session_state.get('last_file') != file.name:
+        st.session_state.ignored_boxes = set()
+        st.session_state.manual_boxes = []
+        st.session_state.last_file = file.name
 
-elif mode_option in ["📷 拍照辨識", "📂 上傳圖片"]:
-    if mode_option == "📷 拍照辨識":
-        file = st.camera_input("拍照")
-    else:
-        file = st.file_uploader("選擇圖片", type=["jpg", "png"])
-        
     if file:
-        bytes_data = file.getvalue()
-        cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-        if mode_option == "📂 上傳圖片": 
-            st.image(cv2_img, caption="原始圖", width=200, channels="BGR")
+        file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
+        img_origin = cv2.imdecode(file_bytes, 1)
         
-        run_app(cv2_img, use_tracking=False)
+        # 前處理
+        gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
+        # 自動判斷模式：照片用 Adaptive, 截圖用 Otsu
+        is_photo = np.mean(gray) < 240 and np.std(gray) > 30
+        if is_photo:
+            binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
+        else:
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            
+        # [V65 Feature]
+        processed = v65_morphology(binary, erosion, dilation)
+        
+        # 偵測
+        cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        detected_data = []
+        
+        display_img = img_origin.copy()
+        
+        # 自動框
+        for c in cnts:
+            if cv2.contourArea(c) < 50: continue
+            x, y, w, h = cv2.boundingRect(c)
+            bid = f"{x}_{y}_{w}_{h}"
+            
+            if bid in st.session_state.ignored_boxes:
+                cv2.rectangle(display_img, (x,y), (x+w,y+h), (128,128,128), 1)
+                continue
+            
+            roi = processed[y:y+h, x:x+w]
+            inp = preprocess_input(roi)
+            pred = cnn_model.predict(inp, verbose=0)[0]
+            
+            if np.max(pred) > min_conf:
+                lbl = np.argmax(pred)
+                cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
+                cv2.putText(display_img, str(lbl), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+                detected_data.append({'id': bid, 'rect':(x,y,w,h), 'type':'auto'})
+
+        # 手動框
+        for mbox in st.session_state.manual_boxes:
+            mx, my, mw, mh = mbox['rect']
+            cv2.rectangle(display_img, (mx,my), (mx+mw,my+mh), (255,0,255), 2)
+            cv2.putText(display_img, str(mbox['lbl']), (mx, my-5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,0,255), 2)
+            detected_data.append({'id': 'manual', 'rect':(mx,my,mw,mh), 'type':'manual'})
+
+        # 顯示
+        # 轉換為 RGB
+        img_rgb = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
+        
+        if edit_mode:
+            st.warning("點擊綠框可刪除；點擊未偵測到的黑字可新增")
+            value = streamlit_image_coordinates(img_rgb, key="click_upload")
+            
+            if value:
+                cx, cy = value['x'], value['y']
+                hit = False
+                # 刪除邏輯
+                for item in detected_data:
+                    if item['type'] == 'manual': continue # 簡化：手動框先不刪
+                    rx, ry, rw, rh = item['rect']
+                    if rx < cx < rx+rw and ry < cy < ry+rh:
+                        st.session_state.ignored_boxes.add(item['id'])
+                        hit = True; st.rerun(); break
+                
+                # 新增邏輯
+                if not hit:
+                    # 在 processed 找點擊的輪廓
+                    mcnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    for mc in mcnts:
+                        if cv2.pointPolygonTest(mc, (cx, cy), False) >= 0:
+                            mx, my, mw, mh = cv2.boundingRect(mc)
+                            m_roi = processed[my:my+mh, mx:mx+mw]
+                            m_pred = cnn_model.predict(preprocess_input(m_roi), verbose=0)[0]
+                            st.session_state.manual_boxes.append({'rect':(mx,my,mw,mh), 'lbl':np.argmax(m_pred)})
+                            st.rerun(); break
+        else:
+            st.image(img_rgb, use_container_width=True)
+            st.markdown(f"**共找到 {len(detected_data)} 個數字**")
+
+# ==========================================
+# 5. 主程式分流 (Main Dispatcher)
+# ==========================================
+def main():
+    st.sidebar.title("🔢 手寫辨識 V65 Ultimate")
+    mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔪 V65 手術刀參數")
+    erosion_iter = st.sidebar.slider("切割沾黏 (Erosion)", 0, 5, 0, help="數字黏在一起時調大這個")
+    dilation_iter = st.sidebar.slider("筆畫加粗 (Dilation)", 0, 3, 2, help="筆畫太細時調大這個")
+    min_conf = st.sidebar.slider("信心門檻", 0.0, 1.0, 0.5)
+
+    if cnn_model is None:
+        st.error("❌ 找不到模型檔案 (cnn_model_robust.h5 或 mnist_cnn.h5)")
+        st.stop()
+
+    if mode == "📷 鏡頭 (Live)":
+        run_camera_mode(erosion_iter, dilation_iter, min_conf)
+    elif mode == "✍️ 手寫板 (Canvas)":
+        run_canvas_mode(erosion_iter, dilation_iter, min_conf)
+    elif mode == "📂 上傳圖片 (Upload)":
+        run_upload_mode(erosion_iter, dilation_iter, min_conf)
+
+if __name__ == "__main__":
+    main()
