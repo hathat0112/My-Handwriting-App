@@ -164,8 +164,6 @@ class LiveProcessor(VideoProcessorBase):
                     cv2.putText(img, f"{lbl}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
         # 3. 簡單的穩定度邏輯 (簡化版)
-        # 若需要 app.py 完整的藍條集氣，可在此處加入邏輯
-        # 這裡示範基本辨識回傳
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 def run_camera_mode(erosion, dilation, min_conf):
@@ -181,25 +179,7 @@ def run_camera_mode(erosion, dilation, min_conf):
 
 # ==========================================
 # 3. 模式 B: 手寫板專用邏輯 (Canvas)
-# 保留 app.py 的時間合併邏輯 (Merge logic)
 # ==========================================
-def merge_strokes_temporal(contours, time_threshold=1.0):
-    """
-    (簡化版邏輯) 手寫板專用：
-    實際上 st_canvas 輸出的是靜態圖，我們主要依賴距離合併。
-    若要時間合併需修改 Canvas 監聽方式，這裡使用 app.py 的「距離合併」精神。
-    """
-    boxes = [cv2.boundingRect(c) for c in contours]
-    # 這裡實作簡單的距離合併
-    if not boxes: return []
-    
-    # 簡單合併重疊框
-    merged = []
-    for b in boxes:
-        # ... (可實作更複雜的 app.py merge_overlapping_boxes)
-        merged.append(b)
-    return merged
-
 def run_canvas_mode(erosion, dilation, min_conf):
     c1, c2 = st.columns([2, 1])
     with c1:
@@ -238,7 +218,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             
             results_txt = []
             for i, (x, y, w, h) in enumerate(boxes):
-                roi = processed[y:y+h, x:x+w]             
+                roi = processed[y:y+h, x:x+w]
                 inp = preprocess_input(roi)
                 
                 pred = cnn_model.predict(inp, verbose=0)[0]
@@ -300,22 +280,23 @@ def run_upload_mode(erosion, dilation, min_conf):
             x, y, w, h = cv2.boundingRect(c)
             
             # ==========================================
-            # 🛑 整合防呆過濾邏輯 (False Positive Filtering)
+            # 🛑 強化版防呆過濾 (Stricter Filtering)
             # ==========================================
-            # 1. 長寬比過濾：中文字通常較寬，數字通常瘦高
             aspect_ratio = w / float(h)
-            if aspect_ratio > 1.2: 
+            
+            # 1. 嚴格長寬比：數字通常是瘦的，正方形(1.0)或橫向(>1.0)通常是中文字或背景
+            if aspect_ratio > 0.9: 
                 continue 
             
-            # 2. 邊框大小過濾：過大的框通常是背景
+            # 2. 邊框大小過濾：過大的框通常是背景 (超過5%)
             img_area = img_origin.shape[0] * img_origin.shape[1]
-            if w * h > (img_area * 0.1): 
+            if w * h > (img_area * 0.05): 
                 continue 
             
-            # 3. 密度過濾：實心色塊不是數字
+            # 3. 密度過濾：數字筆畫細，若密度過高(>0.65)通常是色塊
             roi_check = binary[y:y+h, x:x+w]
             density = cv2.countNonZero(roi_check) / (w * h)
-            if density > 0.8: 
+            if density > 0.65: 
                 continue 
             # ==========================================
 
