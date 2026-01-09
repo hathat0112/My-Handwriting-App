@@ -1,6 +1,12 @@
 streamlit
+streamlit-webrtc
 streamlit-drawable-canvas
+streamlit-image-coordinates
 opencv-python-headless
 tensorflow-cpu
+scikit-learn
+joblib
+av
 numpy
-Pillow
+pandas
+pillow
