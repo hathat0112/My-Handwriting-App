@@ -13,7 +13,7 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V65 Lite)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V65 Debug)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -23,7 +23,6 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 def load_models():
     """載入 CNN 主模型與 KNN 輔助模型"""
     cnn = None
-    # 嘗試載入多種可能的模型檔名
     model_files = ["cnn_model_robust.h5", "mnist_cnn.h5", "cnn_model.h5"]
     for f in model_files:
         if os.path.exists(f):
@@ -40,13 +39,12 @@ def load_models():
             knn = joblib.load(knn_path)
         except: pass
     
-    # 若無 KNN 則現場訓練一個簡單的
     if knn is None:
         try:
             (x_train, y_train), _ = mnist.load_data()
             x_flat = x_train.reshape(-1, 784) / 255.0
             knn = KNeighborsClassifier(n_neighbors=3)
-            knn.fit(x_flat[:5000], y_train[:5000]) # 僅用 5000 筆加速
+            knn.fit(x_flat[:5000], y_train[:5000])
             joblib.dump(knn, knn_path)
         except: pass
         
@@ -56,24 +54,15 @@ def load_models():
 cnn_model, knn_model = load_models()
 
 def v65_morphology(binary_img, erosion, dilation):
-    """
-    [V65 核心] 形態學處理：先切割(Erosion)再膨脹(Dilation)
-    """
+    """[V65 核心] 形態學處理"""
     res = binary_img.copy()
-    
-    # 1. 手術刀切割 (Erosion)
     if erosion > 0:
         kernel = np.ones((3,3), np.uint8)
         res = cv2.erode(res, kernel, iterations=erosion)
-
-    # 2. 斷筆修補 (Close)
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=1)
-
-    # 3. 筆畫加粗 (Dilation)
     if dilation > 0:
         res = cv2.dilate(res, None, iterations=dilation)
-        
     return res
 
 def center_by_moments(img):
@@ -91,11 +80,9 @@ def preprocess_input(roi):
     scale = 20.0 / max(h, w)
     nh, nw = max(1, int(h * scale)), max(1, int(w * scale))
     resized = cv2.resize(roi, (nw, nh), interpolation=cv2.INTER_AREA)
-    
     canvas = np.zeros((28, 28), dtype=np.uint8)
     y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
     canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
-    
     final = center_by_moments(canvas)
     return final.reshape(1, 28, 28, 1).astype('float32') / 255.0
 
@@ -125,7 +112,6 @@ class LiveProcessor(VideoProcessorBase):
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
-        
         binary_proc = v65_morphology(binary, self.erosion, self.dilation)
         
         cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -177,16 +163,19 @@ def run_canvas_mode(erosion, dilation, min_conf):
         )
     
     with c2:
-        st.markdown("### 👁️ 辨識結果")
+        # 標題乾淨 (無圖示)
+        st.markdown("### 辨識結果")
+        
         if canvas_res.image_data is not None and np.max(canvas_res.image_data) > 0:
             raw = canvas_res.image_data.astype(np.uint8)
             img_bgr = cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR) if raw.shape[2] == 4 else raw
             gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
             
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            
             processed = v65_morphology(binary, erosion, dilation)
-            st.image(processed, caption="AI 看見的影像", width=200)
+            
+            # [已恢復] 顯示 Debug 影像，方便使用者除錯
+            st.image(processed, caption="[Debug] AI 看到的影像", width=200)
             
             cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             boxes = sorted([cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 50], key=lambda b: b[0])
@@ -227,10 +216,8 @@ def run_upload_mode(erosion, dilation, min_conf):
         else:
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             
-        # V65 形態學
         processed = v65_morphology(binary, erosion, dilation)
         
-        # 偵測
         cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         detected_count = 0
         display_img = img_origin.copy()
@@ -239,26 +226,14 @@ def run_upload_mode(erosion, dilation, min_conf):
             if cv2.contourArea(c) < 50: continue
             x, y, w, h = cv2.boundingRect(c)
             
-            # ==========================================
-            # 🛑 強化版防呆過濾 (Stricter Filtering)
-            # ==========================================
+            # 防呆過濾
             aspect_ratio = w / float(h)
-            
-            # 1. 嚴格長寬比：數字通常是瘦的，正方形(1.0)或橫向(>1.0)通常是中文字或背景
-            if aspect_ratio > 0.9: 
-                continue 
-            
-            # 2. 邊框大小過濾：過大的框通常是背景 (超過5%)
+            if aspect_ratio > 0.9: continue 
             img_area = img_origin.shape[0] * img_origin.shape[1]
-            if w * h > (img_area * 0.05): 
-                continue 
-            
-            # 3. 密度過濾：數字筆畫細，若密度過高(>0.65)通常是色塊
+            if w * h > (img_area * 0.05): continue 
             roi_check = binary[y:y+h, x:x+w]
             density = cv2.countNonZero(roi_check) / (w * h)
-            if density > 0.65: 
-                continue 
-            # ==========================================
+            if density > 0.65: continue 
             
             roi = processed[y:y+h, x:x+w]
             inp = preprocess_input(roi)
@@ -270,7 +245,6 @@ def run_upload_mode(erosion, dilation, min_conf):
                 cv2.putText(display_img, str(lbl), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
                 detected_count += 1
 
-        # 顯示結果 (移除互動模式，回歸單純顯示)
         img_rgb = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
         st.image(img_rgb, use_container_width=True)
         st.markdown(f"**共找到 {detected_count} 個數字**")
@@ -279,7 +253,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流 (Main Dispatcher)
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 V65 Lite")
+    st.sidebar.title("🔢 手寫辨識 V65 Debug")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
