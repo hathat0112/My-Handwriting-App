@@ -238,7 +238,8 @@ def run_canvas_mode(erosion, dilation, min_conf):
             
             results_txt = []
             for i, (x, y, w, h) in enumerate(boxes):
-                roi = processed[y:y+h, x:x+w]<br>                inp = preprocess_input(roi)
+                roi = processed[y:y+h, x:x+w]             
+                inp = preprocess_input(roi)
                 
                 pred = cnn_model.predict(inp, verbose=0)[0]
                 conf = np.max(pred)
