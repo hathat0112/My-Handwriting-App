@@ -238,8 +238,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             
             results_txt = []
             for i, (x, y, w, h) in enumerate(boxes):
-                roi = processed[y:y+h, x:x+w]
-                inp = preprocess_input(roi)
+                roi = processed[y:y+h, x:x+w]<br>                inp = preprocess_input(roi)
                 
                 pred = cnn_model.predict(inp, verbose=0)[0]
                 conf = np.max(pred)
@@ -255,7 +254,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
 
 # ==========================================
 # 4. 模式 C: 上傳圖片專用邏輯 (Upload)
-# 結合 app.py 的編輯模式 (Edit Mode)
+# 結合 app.py 的編輯模式 (Edit Mode) 與 防呆機制
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     st.info("支援 JPG/PNG，可切換至「編輯模式」修正誤判")
@@ -298,6 +297,27 @@ def run_upload_mode(erosion, dilation, min_conf):
         for c in cnts:
             if cv2.contourArea(c) < 50: continue
             x, y, w, h = cv2.boundingRect(c)
+            
+            # ==========================================
+            # 🛑 整合防呆過濾邏輯 (False Positive Filtering)
+            # ==========================================
+            # 1. 長寬比過濾：中文字通常較寬，數字通常瘦高
+            aspect_ratio = w / float(h)
+            if aspect_ratio > 1.2: 
+                continue 
+            
+            # 2. 邊框大小過濾：過大的框通常是背景
+            img_area = img_origin.shape[0] * img_origin.shape[1]
+            if w * h > (img_area * 0.1): 
+                continue 
+            
+            # 3. 密度過濾：實心色塊不是數字
+            roi_check = binary[y:y+h, x:x+w]
+            density = cv2.countNonZero(roi_check) / (w * h)
+            if density > 0.8: 
+                continue 
+            # ==========================================
+
             bid = f"{x}_{y}_{w}_{h}"
             
             if bid in st.session_state.ignored_boxes:
