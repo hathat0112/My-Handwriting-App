@@ -13,7 +13,7 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (ID Only)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Instruction Ver.)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -169,13 +169,20 @@ class LiveProcessor(VideoProcessorBase):
                 
                 if conf > self.min_conf:
                     cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    # [修改] 只顯示編號
                     draw_label(img, f"#{count_id}", x, y)
                     count_id += 1
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 def run_camera_mode(erosion, dilation, min_conf):
+    # [新增] 使用說明
+    with st.expander("📖 鏡頭模式使用說明 (點擊展開)", expanded=True):
+        st.markdown("""
+        1. **啟動**：點擊下方 `START` 按鈕並允許攝影機權限。
+        2. **對準**：將數字置於鏡頭中央，盡量保持背景單純。
+        3. **辨識**：系統會自動框選並顯示 **編號 (#1, #2...)**。
+        """)
+
     st.info("📷 將數字置於鏡頭中央，系統會自動辨識")
     ctx = webrtc_streamer(
         key="v65-cam",
@@ -190,6 +197,14 @@ def run_camera_mode(erosion, dilation, min_conf):
 # 3. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
+    # [新增] 使用說明
+    with st.expander("📖 手寫板模式使用說明 (點擊展開)", expanded=True):
+        st.markdown("""
+        1. **書寫**：在下方黑色區域直接寫數字。
+        2. **工具**：左側可切換筆刷或橡皮擦，下方按鈕可清除畫布。
+        3. **結果**：畫布上會顯示 **編號**，右側清單顯示 **辨識數字**。
+        """)
+
     c1, c2 = st.columns([2, 1])
     with c1:
         canvas_res = st_canvas(
@@ -231,11 +246,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 
                 if conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    
-                    # [修改] 圖片上只顯示 "#編號"，不顯示預測結果
                     draw_label(draw_img, f"#{i+1}", x, y)
-                    
-                    # 預測結果顯示在右側清單中
                     results_txt.append(f"**#{i+1}**: 數字 `{lbl}` ({int(conf*100)}%)")
             
             st.image(draw_img, channels="BGR", use_container_width=True, caption="辨識結果 (僅編號)")
@@ -249,6 +260,14 @@ def run_canvas_mode(erosion, dilation, min_conf):
 # 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
+    # [新增] 使用說明
+    with st.expander("📖 圖片上傳指南 (點擊展開)", expanded=True):
+        st.markdown("""
+        1. **上傳**：支援 JPG/PNG，點擊下方按鈕上傳。
+        2. **過濾**：系統已啟用 **3x3 網格掃描** 與 **孔洞偵測**，自動排除複雜國字與陰影。
+        3. **對照**：圖片上顯示 **編號**，詳細數字結果請看右側清單。
+        """)
+
     st.info("支援 JPG/PNG，已啟用【3x3網格掃描】來排除複雜國字")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
@@ -318,14 +337,18 @@ def run_upload_mode(erosion, dilation, min_conf):
 
         valid_boxes_data.sort(key=lambda item: (item['rect'][1]//50, item['rect'][0]))
 
+        # 用於儲存文字結果
+        results_list = []
+
         for idx, item in enumerate(valid_boxes_data):
             x, y, w, h = item['rect']
             lbl = item['lbl']
+            conf = item['conf']
             
             cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
-            
-            # [修改] 只顯示編號
             draw_label(display_img, f"#{idx+1}", x, y)
+            
+            results_list.append(f"**#{idx+1}**: 數字 `{lbl}` ({int(conf*100)}%)")
             detected_count += 1
 
         img_rgb = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
@@ -336,16 +359,32 @@ def run_upload_mode(erosion, dilation, min_conf):
         with c2:
             st.image(processed, use_container_width=True, caption="[Debug] AI 視角")
             st.markdown(f"**共找到 {detected_count} 個數字**")
+            
+            # 顯示結果清單
+            if results_list:
+                st.markdown("---")
+                st.markdown("#### 📝 詳細清單")
+                for r in results_list:
+                    st.markdown(r)
 
 # ==========================================
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (IDs Only)")
+    st.sidebar.title("🔢 手寫辨識 (Instruction)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔪 V65 手術刀參數")
+    
+    # [新增] 參數說明
+    with st.sidebar.expander("❓ 參數調整小教室"):
+        st.markdown("""
+        * **切割沾黏 (Erosion)**：數字黏在一起時調大。
+        * **筆畫加粗 (Dilation)**：筆畫斷掉時調大。
+        * **信心門檻**：雜訊太多時調高。
+        """)
+
     erosion_iter = st.sidebar.slider("切割沾黏 (Erosion)", 0, 5, 0, help="數字黏在一起時調大這個")
     dilation_iter = st.sidebar.slider("筆畫加粗 (Dilation)", 0, 3, 2, help="筆畫太細時調大這個")
     min_conf = st.sidebar.slider("信心門檻", 0.0, 1.0, 0.80) 
