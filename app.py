@@ -11,17 +11,18 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 from tensorflow.keras.models import load_model
 from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC # [新增] 引入 SVM
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Guide Ver.)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Triple Verify)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
-# 1. 共用核心
+# 1. 共用核心 (集成 CNN, KNN, SVM)
 # ==========================================
 @st.cache_resource
 def load_models():
-    # 1. 載入 CNN (主模型)
+    # --- 1. 載入 CNN (主模型) ---
     cnn = None
     model_files = ["cnn_model_robust.h5", "mnist_cnn.h5", "cnn_model.h5"]
     for f in model_files:
@@ -32,29 +33,51 @@ def load_models():
                 break
             except: pass
     
-    # 2. 載入或訓練 KNN (輔助模型)
+    # 準備訓練資料 (給 KNN 和 SVM 用)
+    # 為了不讓啟動太慢，我們只取前 10,000 筆資料來訓練，這對 MNIST 已經很足夠
+    x_flat = None
+    y_train = None
+    try:
+        (x_raw, y_raw), _ = mnist.load_data()
+        x_flat = x_raw.reshape(-1, 784)[:10000] / 255.0
+        y_train = y_raw[:10000]
+    except: pass
+
+    # --- 2. 載入或訓練 KNN ---
     knn = None
     knn_path = "knn_model.pkl"
     if os.path.exists(knn_path):
-        try:
-            knn = joblib.load(knn_path)
-            print("✅ KNN 模型載入成功")
+        try: knn = joblib.load(knn_path)
         except: pass
     
-    if knn is None:
-        st.toast("正在訓練輔助用 KNN 模型 (初次執行較慢)...")
+    if knn is None and x_flat is not None:
         try:
-            (x_train, y_train), _ = mnist.load_data()
-            x_flat = x_train.reshape(-1, 784) / 255.0
-            knn = KNeighborsClassifier(n_neighbors=5)
-            knn.fit(x_flat[:10000], y_train[:10000])
+            knn = KNeighborsClassifier(n_neighbors=3)
+            knn.fit(x_flat, y_train)
             joblib.dump(knn, knn_path)
-            print("✅ KNN 模型訓練完成")
+            print("✅ KNN 訓練完成")
+        except: pass
+
+    # --- 3. [新增] 載入或訓練 SVM ---
+    svm = None
+    svm_path = "svm_model.pkl"
+    if os.path.exists(svm_path):
+        try: svm = joblib.load(svm_path)
+        except: pass
+    
+    if svm is None and x_flat is not None:
+        try:
+            # probability=True 讓我們可以取得信心分數
+            svm = SVC(kernel='rbf', probability=True)
+            svm.fit(x_flat, y_train)
+            joblib.dump(svm, svm_path)
+            print("✅ SVM 訓練完成")
         except: pass
         
-    return cnn, knn
+    return cnn, knn, svm
 
-cnn_model, knn_model = load_models()
+# 初始化三個模型
+cnn_model, knn_model, svm_model = load_models()
 
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
@@ -89,9 +112,13 @@ def preprocess_input(roi):
     y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
     canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
     final = center_by_moments(canvas)
+    
+    # CNN 需要 (1, 28, 28, 1)
     cnn_in = final.reshape(1, 28, 28, 1).astype('float32') / 255.0
-    knn_in = final.reshape(1, 784).astype('float32') / 255.0
-    return cnn_in, knn_in
+    # KNN 和 SVM 需要 (1, 784)
+    flat_in = final.reshape(1, 784).astype('float32') / 255.0
+    
+    return cnn_in, flat_in
 
 def count_holes(binary_roi):
     contours, hierarchy = cv2.findContours(binary_roi, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
@@ -131,7 +158,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
         self.model = cnn_model
-        self.knn = knn_model
+        # 鏡頭模式為了流暢度，暫時不啟用 KNN/SVM 驗證
         self.erosion = 0
         self.dilation = 2
         self.min_conf = 0.6
@@ -154,6 +181,7 @@ class LiveProcessor(VideoProcessorBase):
         binary_proc = v65_morphology(binary, self.erosion, self.dilation)
         
         cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
         boxes_data = []
         for c in cnts:
             if cv2.contourArea(c) < 100: continue
@@ -180,22 +208,9 @@ class LiveProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 def run_camera_mode(erosion, dilation, min_conf):
-    # [新增] 詳細使用說明
-    with st.expander("📖 鏡頭模式使用指南 & 注意事項 (點擊展開)", expanded=True):
-        st.markdown("""
-        ### 🎯 使用步驟
-        1. **啟動**：點擊下方 `START` 按鈕，瀏覽器會請求攝影機權限，請點選「允許」。
-        2. **對準**：將寫有數字的紙張或物體，平穩地置於畫面中央。
-        3. **判讀**：系統會即時框選看到的數字，並顯示綠色框框與編號。
-
-        ### ⚠️ 注意事項與技巧
-        * **💡 光線是關鍵**：請確保環境**光線充足**。太暗或有強烈陰影（例如手機遮住光線）會導致誤判。
-        * **💡 背景要乾淨**：最理想的情況是 **「白紙黑字」**。如果背景太雜亂（例如有格子、花紋），系統可能會混淆。
-        * **💡 距離要適中**：數字太小（離鏡頭太遠）會看不清楚；數字太大（爆框）也會無法辨識。
-        * **💡 避免手震**：手持鏡頭時請盡量保持穩定，模糊的影像會讓 AI 看成一團霧。
-        """)
-
-    st.info("📷 鏡頭模式 (為求流暢，此模式主要使用 CNN)")
+    with st.expander("📖 鏡頭模式使用說明 (點擊展開)", expanded=True):
+        st.markdown("1. 點擊 `START`。 2. 對準數字。 3. 系統自動框選 (此模式僅使用 CNN 以保持流暢)。")
+    st.info("📷 鏡頭模式")
     ctx = webrtc_streamer(
         key="v65-cam",
         mode=WebRtcMode.SENDRECV,
@@ -209,22 +224,8 @@ def run_camera_mode(erosion, dilation, min_conf):
 # 3. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
-    # [新增] 詳細使用說明
-    with st.expander("📖 手寫板模式使用指南 & 注意事項 (點擊展開)", expanded=True):
-        st.markdown("""
-        ### 🎯 使用步驟
-        1. **書寫**：在下方的黑色畫布區，用滑鼠或觸控筆直接寫下 0-9 的數字。
-        2. **工具**：
-            * **✏️ 畫筆**：預設工具，用來寫字。
-            * **🧽 橡皮擦**：擦掉寫錯的部分。
-            * **↩️ 復原一筆**：寫壞了？按一下稍微回溯，不用全部重寫。
-            * **🗑️ 清除全部**：一鍵清空畫布，重新開始。
-        
-        ### ⚠️ 注意事項與技巧
-        * **💡 字體端正**：雖然 AI 看得懂潦草字，但寫得端正準確度最高。
-        * **💡 不要黏在一起**：請將每個數字分開寫，**不要連筆**或重疊，否則 AI 會把它們看成同一個奇怪的符號。
-        * **💡 筆劃完整**：例如數字 `0` 或 `8`，請盡量把圈圈封好，不要留太大的缺口。
-        """)
+    with st.expander("📖 手寫板模式使用說明", expanded=False):
+        st.markdown("直接書寫，可使用復原或橡皮擦。")
 
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
     if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
@@ -289,6 +290,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 roi = processed[y:y+h, x:x+w]
                 cnn_in, _ = preprocess_input(roi)
                 
+                # 手寫板模式，我們以 CNN 為主即可 (因為背景乾淨)
                 pred = cnn_model.predict(cnn_in, verbose=0)[0]
                 conf = np.max(pred)
                 lbl = np.argmax(pred)
@@ -305,31 +307,22 @@ def run_canvas_mode(erosion, dilation, min_conf):
             with result_container: st.info("請在左側書寫...")
 
 # ==========================================
-# 4. 上傳模式 (整合 CNN + KNN 雙重驗證)
+# 4. 上傳模式 (核心：三模型投票)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
-    # [新增] 詳細使用說明
     with st.expander("📖 上傳模式使用指南 & 疑難排解 (點擊展開)", expanded=True):
         st.markdown("""
         ### 🎯 使用步驟
-        1. **上傳**：點擊 `Browse files` 選擇一張含有數字的圖片 (JPG/PNG)。
-        2. **等待**：系統會自動進行影像處理、切割、與雙重模型驗證。
-        3. **檢視**：圖片上會顯示綠色框與編號，右側清單會列出詳細結果。
+        1. **上傳**：選擇一張含有數字的圖片 (JPG/PNG)。
+        2. **等待**：系統進行 **CNN + KNN + SVM 三重驗證**。
+        3. **檢視**：查看結果。
 
-        ### ⚠️ 為什麼有些字沒抓到？(系統過濾機制)
-        為了避免把「國字」、「插圖」或「陰影」誤判成數字，本模式啟用了 **嚴格過濾**：
-        * **🚫 形狀不對**：如果框框太細長（像 "l"）或太寬扁（像 "一"），會被視為雜訊。
-        * **🚫 結構太複雜**：系統會掃描筆畫，如果發現線條縱橫交錯（像「法」、「則」等中文字），會直接忽略。
-        * **🚫 密度異常**：如果一個框框裡黑色填滿的比例太高（像實心方塊）或太低（像空心圓圈），也會被過濾。
-        * **🚫 雙重驗證失敗**：如果 **CNN** 模型說是 8，但 **KNN** 模型說是 6，系統會判定為「有爭議」並扣分，信心不足就會隱藏。
-
-        ### 💡 提升準確率的小撇步
-        * 盡量使用 **白底黑字** 的圖片。
-        * 如果字黏在一起，試著調整左側的 **「切割沾黏 (Erosion)」** 參數。
-        * 如果字筆畫斷掉，試著調整左側的 **「筆畫加粗 (Dilation)」** 參數。
+        ### ⚠️ 過濾機制
+        * **三重驗證**：系統同時詢問三個 AI。如果他們意見嚴重分歧，該結果會被視為雜訊並過濾。
+        * **結構過濾**：太複雜的國字或陰影會被自動排除。
         """)
 
-    st.info("✅ 已啟用【雙重模型驗證】+【結構複雜度過濾】，強力排除非數字干擾")
+    st.info("✅ 已啟用【CNN + KNN + SVM】黃金三角驗證，準確度大幅提升")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -369,41 +362,68 @@ def run_upload_mode(erosion, dilation, min_conf):
             max_strokes = check_multiline_complexity(roi_check)
             if max_strokes > 3: continue 
             
-            # 雙重模型預測
+            # ============================================
+            # 🧠 三重模型投票 (Triple Voting)
+            # ============================================
             roi = processed[y:y+h, x:x+w]
-            cnn_in, knn_in = preprocess_input(roi)
+            cnn_in, flat_in = preprocess_input(roi)
             
+            # 1. CNN 預測
             pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
-            conf_cnn = np.max(pred_cnn)
             lbl_cnn = np.argmax(pred_cnn)
+            conf_cnn = np.max(pred_cnn)
             
+            # 2. KNN 預測
             lbl_knn = -1
-            if knn_model:
-                lbl_knn = knn_model.predict(knn_in)[0]
+            if knn_model: lbl_knn = knn_model.predict(flat_in)[0]
+            
+            # 3. SVM 預測
+            lbl_svm = -1
+            if svm_model: lbl_svm = svm_model.predict(flat_in)[0]
+            
+            # 投票機制
+            votes = [lbl_cnn]
+            if knn_model: votes.append(lbl_knn)
+            if svm_model: votes.append(lbl_svm)
+            
+            # 找出票數最高的數字
+            final_lbl = max(set(votes), key=votes.count)
+            vote_count = votes.count(final_lbl)
+            total_voters = len(votes)
             
             final_conf = conf_cnn
-            is_disagree = False
+            status_note = ""
             
-            if knn_model and lbl_cnn != lbl_knn:
-                final_conf -= 0.30 
-                is_disagree = True
-            
+            # 判決邏輯
+            if vote_count == total_voters:
+                # 全票通過：信心加分
+                final_conf = min(1.0, final_conf + 0.1)
+                status_note = "" 
+            elif vote_count >= 2:
+                # 多數決通過：如果是 CNN 跑票，扣分重一點
+                if lbl_cnn != final_lbl:
+                    final_conf -= 0.25
+                    status_note = " (⚠️爭議)"
+                else:
+                    final_conf -= 0.1
+            else:
+                # 三個都不一樣 (1 vs 1 vs 1)：直接過濾
+                continue
+
+            # 後續過濾
             holes = count_holes(roi)
-            if lbl_cnn != 1 and aspect_ratio < 0.35: continue
-            if lbl_cnn == 1 and aspect_ratio > 0.6: continue
-            if lbl_cnn in [8, 0, 6, 9] and holes == 0: continue
-            if lbl_cnn in [1, 2, 3, 5, 7] and holes > 0: continue
+            if final_lbl != 1 and aspect_ratio < 0.35: continue
+            if final_lbl == 1 and aspect_ratio > 0.6: continue
+            if final_lbl in [8, 0, 6, 9] and holes == 0: continue
+            if final_lbl in [1, 2, 3, 5, 7] and holes > 0: continue
 
             target_thresh = min_conf
-            if lbl_cnn in [4, 7]: target_thresh += 0.20
+            if final_lbl in [4, 7]: target_thresh += 0.20
             
             if final_conf > target_thresh:
-                status_note = ""
-                if is_disagree: status_note = " (⚠️爭議)"
-                
                 valid_boxes_data.append({
                     'rect': (x, y, w, h),
-                    'lbl': lbl_cnn,
+                    'lbl': final_lbl,
                     'conf': final_conf,
                     'note': status_note
                 })
@@ -437,13 +457,12 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (Guide Ver.)")
+    st.sidebar.title("🔢 手寫辨識 (Triple Verify)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔪 V65 手術刀參數")
     
-    # 詳細的參數調整指南
     with st.sidebar.expander("❓ 參數調整指南"):
         st.markdown("""
         **1. 切割沾黏 (Erosion)**
@@ -464,7 +483,7 @@ def main():
     min_conf = st.sidebar.slider("信心門檻", 0.0, 1.0, 0.80) 
 
     if cnn_model is None:
-        st.error("❌ 找不到模型檔案")
+        st.error("❌ 找不到模型檔案 (cnn_model_robust.h5 或 mnist_cnn.h5)")
         st.stop()
 
     if mode == "📷 鏡頭 (Live)":
