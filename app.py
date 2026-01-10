@@ -13,7 +13,7 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V65 Super Strict)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Final)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -82,12 +82,9 @@ def preprocess_input(roi):
     return final.reshape(1, 28, 28, 1).astype('float32') / 255.0
 
 def count_holes(binary_roi):
-    """計算二值化圖像中的孔洞數量 (拓撲特徵)"""
     contours, hierarchy = cv2.findContours(binary_roi, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     holes = 0
     if hierarchy is not None:
-        # hierarchy 結構: [Next, Previous, First_Child, Parent]
-        # 如果 Parent != -1，代表這是內輪廓 (洞)
         for h in hierarchy[0]:
             if h[3] != -1:
                 holes += 1
@@ -201,10 +198,10 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 st.warning("寫得太潦草或信心過低")
 
 # ==========================================
-# 4. 模式 C: 上傳圖片 - 超強過濾版
+# 4. 模式 C: 上傳圖片 - 終極過濾版
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
-    st.info("支援 JPG/PNG，已啟用【孔洞偵測】來過濾中文字與陰影")
+    st.info("支援 JPG/PNG，已啟用【長寬比+孔洞偵測】雙重過濾")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -216,7 +213,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         # 1. 影像增強
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # 2. 雙重二值化 (Dual Thresholding)
+        # 2. 雙重二值化
         thresh_adapt = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 25, 10)
         _, thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         binary_combined = cv2.bitwise_and(thresh_adapt, thresh_otsu)
@@ -233,56 +230,45 @@ def run_upload_mode(erosion, dilation, min_conf):
             if area < 80: continue 
             x, y, w, h = cv2.boundingRect(c)
             
-            # ==========================================
-            # 🛑 第一階段：物理尺寸過濾
-            # ==========================================
+            # 物理基礎過濾
             if x < 5 or y < 5 or (x+w) > w_orig-5 or (y+h) > h_orig-5: continue # 邊緣
-            
-            aspect_ratio = w / float(h)
-            if aspect_ratio > 1.1: continue # 太寬 (通常是中文字或單詞)
-            if aspect_ratio < 0.15: continue # 太細 (通常是雜訊線條)
-            
             if w * h > (h_orig * w_orig * 0.1): continue # 巨大物件
             
             roi_check = processed[y:y+h, x:x+w]
             density = cv2.countNonZero(roi_check) / (w * h)
-            if density < 0.12 or density > 0.60: continue # 密度過高或過低
+            if density < 0.12 or density > 0.60: continue # 密度異常
             
-            # ==========================================
-            # 🧠 模型預測
-            # ==========================================
+            # 模型預測
             roi = processed[y:y+h, x:x+w]
             inp = preprocess_input(roi)
             pred = cnn_model.predict(inp, verbose=0)[0]
             
             conf = np.max(pred)
             lbl = np.argmax(pred)
-            
-            # ==========================================
-            # 🛑 第二階段：邏輯與特徵過濾 (Hole Check)
-            # ==========================================
+            aspect_ratio = w / float(h)
             holes = count_holes(roi)
+
+            # ==========================================
+            # 🛑 邏輯過濾核心 (Kill Filters)
+            # ==========================================
             
-            # 規則 1: 數字 8 必須有洞
-            # 如果 AI 說是 8，但沒有洞，那通常是實心陰影或誤判
+            # 規則 1: 【瘦子條款】除了 1 以外，其他數字長寬比不能太細
+            # 這能殺掉誤判為 3, 2, 5, 7 的豎畫
+            if lbl != 1 and aspect_ratio < 0.35: continue
+            
+            # 規則 2: 數字 1 若太胖 (> 0.6) 視為中文字筆畫
+            if lbl == 1 and aspect_ratio > 0.6: continue
+
+            # 規則 3: 數字 8 必須有洞
             if lbl == 8 and holes == 0: continue
             
-            # 規則 2: 數字 0, 6, 9 通常有洞 (偶爾手寫會封起來，所以我們只過濾極端情況)
-            # 如果 AI 說是 0 且沒洞，且信心度不高，殺掉
-            if lbl == 0 and holes == 0 and conf < 0.95: continue
-            
-            # 規則 3: 數字 1 不應該有大洞
-            if lbl == 1 and holes > 0: continue
-            
-            # 規則 4: 數字 1 必須瘦長
-            # 如果 AI 說是 1，但長寬比太胖 (> 0.5)，那通常是中文字的筆畫
-            if lbl == 1 and aspect_ratio > 0.55: continue
+            # 規則 4: 數字 0 必須有洞 (除非信心超高)
+            if lbl == 0 and holes == 0 and conf < 0.98: continue
 
-            # 規則 5: 針對容易誤判的 4, 3, 7 提高門檻
-            # 中文字的筆畫最常被看成 4, 3, 7
+            # 規則 5: 提高易誤判數字的門檻
             final_conf_thresh = min_conf
-            if lbl in [3, 4, 7]: final_conf_thresh += 0.20 # 對這些數字要求超高信心
-            if lbl in [1, 8]: final_conf_thresh += 0.10
+            if lbl in [3, 4, 7]: final_conf_thresh += 0.20 # 3,4,7 容易是文字筆畫
+            if lbl in [1, 2, 5]: final_conf_thresh += 0.10
 
             if conf > final_conf_thresh:
                 # 繪圖
@@ -308,7 +294,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 V65 Fix")
+    st.sidebar.title("🔢 手寫辨識 Final")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
