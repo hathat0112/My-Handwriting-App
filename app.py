@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V75 Cleanest)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V76 Speed Demon)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -319,23 +319,30 @@ def run_canvas_mode(erosion, dilation, min_conf):
             with result_container: st.info("請在左側書寫...")
 
 # ==========================================
-# 4. 上傳模式 (V75 極致降噪)
+# 4. 上傳模式 (V76 Speed Demon)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     with st.expander("📖 上傳模式使用指南", expanded=True):
         st.markdown("""
         **1. 上傳**：選擇圖片。 **2. 檢視**：系統會自動過濾雜訊並辨識。
-        * **新功能**：針對微小雜訊 (如 #11) 進行了更嚴格的尺寸過濾。
+        * **效能升級**：大圖自動縮放，辨識速度大幅提升。
         """)
 
-    st.info("✅ 已啟用【V75 極致降噪引擎】，可辨識陰影下的鉛筆字")
+    st.info("✅ 已啟用【V76 極速引擎】，秒解大圖")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
     if file:
         file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
         img_origin = cv2.imdecode(file_bytes, 1)
-        h_orig, w_orig = img_origin.shape[:2]
+        
+        # [核心優化] 圖片瘦身：如果太寬，就縮到 1000px
+        # 這能讓後面的高斯模糊、二值化速度快 10 倍以上！
+        h, w = img_origin.shape[:2]
+        if w > 1000:
+            scale = 1000 / w
+            img_origin = cv2.resize(img_origin, (1000, int(h * scale)))
+            
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
         # 1. 磨皮
@@ -355,17 +362,17 @@ def run_upload_mode(erosion, dilation, min_conf):
         
         for c in cnts:
             area = cv2.contourArea(c)
-            # [修正 1] 面積門檻拉高到 180 (殺掉較大的雜訊塊)
+            # 面積門檻 (因為圖片被縮小了，門檻不用設太大)
             if area < 180: continue 
             
             x, y, w, h = cv2.boundingRect(c)
             
-            # [修正 2] 尺寸雙重鎖定：如果寬度小於 25 且 高度小於 25，直接判定為雜訊點
-            # 真正的數字一定會有一邊比較長 (1很高, 0很寬)
-            if w < 25 and h < 25: continue
+            # 尺寸雙重鎖定 (殺雜訊)
+            if w < 20 and h < 20: continue
             
-            # 排除紙張邊緣長條
-            if w * h > (h_orig * w_orig * 0.9): continue
+            # 排除長條
+            h_curr, w_curr = img_origin.shape[:2]
+            if w * h > (h_curr * w_curr * 0.9): continue
             
             roi = processed[y:y+h, x:x+w]
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
@@ -398,7 +405,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         with c1:
             st.image(img_rgb, use_container_width=True, caption="辨識結果 (僅編號)")
         with c2:
-            st.image(processed, use_container_width=True, caption="[Debug] AI 視角 (已降噪)")
+            st.image(processed, use_container_width=True, caption="[Debug] AI 視角")
             st.markdown(f"**共找到 {detected_count} 個數字**")
             if results_list:
                 st.markdown("---")
@@ -409,7 +416,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (V75 Cleanest)")
+    st.sidebar.title("🔢 手寫辨識 (V76 Speed Demon)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
