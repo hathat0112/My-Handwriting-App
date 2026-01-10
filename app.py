@@ -14,15 +14,15 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Visual IDs)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Anti-Ghost)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
-# 1. 共用核心 (集成 CNN, KNN, SVM)
+# 1. 共用核心
 # ==========================================
 @st.cache_resource
 def load_models():
-    # --- 1. 載入 CNN (主模型) ---
+    # 1. CNN
     cnn = None
     model_files = ["cnn_model_robust.h5", "mnist_cnn.h5", "cnn_model.h5"]
     for f in model_files:
@@ -33,7 +33,7 @@ def load_models():
                 break
             except: pass
     
-    # 準備訓練資料 (給 KNN 和 SVM 用)
+    # 2. KNN & SVM 訓練資料
     x_flat = None
     y_train = None
     try:
@@ -42,7 +42,7 @@ def load_models():
         y_train = y_raw[:10000]
     except: pass
 
-    # --- 2. 載入或訓練 KNN ---
+    # 2. KNN
     knn = None
     knn_path = "knn_model.pkl"
     if os.path.exists(knn_path):
@@ -54,10 +54,9 @@ def load_models():
             knn = KNeighborsClassifier(n_neighbors=3)
             knn.fit(x_flat, y_train)
             joblib.dump(knn, knn_path)
-            print("✅ KNN 訓練完成")
         except: pass
 
-    # --- 3. 載入或訓練 SVM ---
+    # 3. SVM
     svm = None
     svm_path = "svm_model.pkl"
     if os.path.exists(svm_path):
@@ -69,7 +68,6 @@ def load_models():
             svm = SVC(kernel='rbf', probability=True)
             svm.fit(x_flat, y_train)
             joblib.dump(svm, svm_path)
-            print("✅ SVM 訓練完成")
         except: pass
         
     return cnn, knn, svm
@@ -143,9 +141,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     scale = 0.8
     thickness = 2
     (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
-    # 畫黑色背景讓字更清楚
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
-    # 畫黃色文字
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
 # ==========================================
@@ -202,13 +198,7 @@ class LiveProcessor(VideoProcessorBase):
 
 def run_camera_mode(erosion, dilation, min_conf):
     with st.expander("📖 鏡頭模式使用說明 (點擊展開)", expanded=True):
-        st.markdown("""
-        ### 🎯 使用步驟
-        1. **啟動**：點擊下方 `START` 按鈕，瀏覽器會請求攝影機權限，請點選「允許」。
-        2. **對準**：將寫有數字的紙張或物體，平穩地置於畫面中央。
-        3. **判讀**：系統會即時框選看到的數字，並顯示綠色框框與編號。
-        """)
-    
+        st.markdown("1. 點擊 `START`。 2. 對準數字。 3. 系統自動框選。")
     st.info("📷 鏡頭模式")
     ctx = webrtc_streamer(
         key="v65-cam",
@@ -220,16 +210,11 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 手寫板模式 (顯示編號版)
+# 3. 手寫板模式 (強化版)
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     with st.expander("📖 手寫板模式使用說明 (點擊展開)", expanded=False):
-        st.markdown("""
-        ### 🎯 使用步驟
-        1. **書寫**：在下方的黑色畫布區，用滑鼠或觸控筆直接寫下 0-9 的數字。
-        2. **工具**：左側可切換畫筆/橡皮擦，上方有復原功能。
-        3. **對照**：畫布 **右側** 會出現一張「分析圖」，上面會標示 **編號(#1, #2...)** 供您對照下方清單。
-        """)
+        st.markdown("直接書寫，使用工具列修改，右側查看結果。")
 
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
     if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
@@ -273,7 +258,6 @@ def run_canvas_mode(erosion, dilation, min_conf):
     
     with c2:
         st.markdown("### 👁️ 分析與編號")
-        # 結果容器
         result_container = st.container(height=400, border=True)
         
         if canvas_res.image_data is not None and np.max(canvas_res.image_data) > 0:
@@ -285,10 +269,27 @@ def run_canvas_mode(erosion, dilation, min_conf):
             
             cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            # 過濾太小的雜點 (面積 < 300)
-            boxes = sorted([cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 300], key=lambda b: b[0])
+            valid_boxes = []
             
-            # 準備一張圖來畫框框和編號
+            # [修正重點] 這裡加入嚴格的形狀過濾
+            for c in cnts:
+                area = cv2.contourArea(c)
+                x, y, w, h = cv2.boundingRect(c)
+                
+                # 1. 面積過濾：太小的雜點 (白點) 殺掉
+                # 手寫板解析度高，所以門檻設高一點 (600)
+                if area < 600: continue
+                
+                # 2. 尺寸過濾：太矮或太窄的殺掉
+                if h < 40 or w < 20: continue
+                
+                # 3. 長寬比過濾：太扁的 (像橫線) 殺掉
+                aspect_ratio = w / float(h)
+                if aspect_ratio > 3.0: continue # 寬度是高度的3倍以上 -> 橫線
+                
+                valid_boxes.append((x,y,w,h))
+            
+            boxes = sorted(valid_boxes, key=lambda b: b[0])
             draw_img = img_bgr.copy()
             results_list = []
             
@@ -301,16 +302,14 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 
                 if conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    # [重點] 在這張圖上標示編號
                     draw_label(draw_img, f"#{i+1}", x, y)
                     results_list.append({"編號": f"#{i+1}", "預測數字": str(lbl), "信心度": f"{int(conf*100)}%"})
             
-            # [重點] 在右側顯示帶有編號的圖片
             st.image(draw_img, caption="編號對照圖", channels="BGR", use_container_width=True)
 
             with result_container:
                 if results_list: st.dataframe(results_list, hide_index=True, use_container_width=True)
-                else: st.info("尚未偵測到數字")
+                else: st.info("尚未偵測到有效數字")
         else:
             with result_container: st.info("請在左側書寫...")
 
@@ -318,13 +317,8 @@ def run_canvas_mode(erosion, dilation, min_conf):
 # 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
-    with st.expander("📖 上傳模式使用指南 & 疑難排解 (點擊展開)", expanded=True):
-        st.markdown("""
-        ### 🎯 使用步驟
-        1. **上傳**：選擇一張含有數字的圖片 (JPG/PNG)。
-        2. **等待**：系統會自動進行影像處理、切割、與雙重模型驗證。
-        3. **檢視**：圖片上會顯示綠色框與編號，右側清單會列出詳細結果。
-        """)
+    with st.expander("📖 上傳模式使用指南", expanded=True):
+        st.markdown("上傳圖片，系統會使用三模型驗證並排除雜訊。")
 
     st.info("✅ 已啟用【CNN + KNN + SVM】黃金三角驗證，準確度大幅提升")
     
@@ -444,7 +438,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (Visual IDs)")
+    st.sidebar.title("🔢 手寫辨識 (Anti-Ghost)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
