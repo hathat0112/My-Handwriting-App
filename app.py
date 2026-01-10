@@ -13,7 +13,7 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Dual Verify)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Guide Ver.)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -45,10 +45,9 @@ def load_models():
         st.toast("正在訓練輔助用 KNN 模型 (初次執行較慢)...")
         try:
             (x_train, y_train), _ = mnist.load_data()
-            # 扁平化處理供 KNN 使用
             x_flat = x_train.reshape(-1, 784) / 255.0
-            knn = KNeighborsClassifier(n_neighbors=5) # 5個鄰居投票
-            knn.fit(x_flat[:10000], y_train[:10000]) # 用 1萬筆資料訓練比較快
+            knn = KNeighborsClassifier(n_neighbors=5)
+            knn.fit(x_flat[:10000], y_train[:10000])
             joblib.dump(knn, knn_path)
             print("✅ KNN 模型訓練完成")
         except: pass
@@ -90,7 +89,6 @@ def preprocess_input(roi):
     y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
     canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
     final = center_by_moments(canvas)
-    # 回傳兩種格式：CNN用的 (1,28,28,1) 和 KNN用的 (1, 784)
     cnn_in = final.reshape(1, 28, 28, 1).astype('float32') / 255.0
     knn_in = final.reshape(1, 784).astype('float32') / 255.0
     return cnn_in, knn_in
@@ -168,7 +166,7 @@ class LiveProcessor(VideoProcessorBase):
         count_id = 1
         for (x, y, w, h) in boxes_data:
             roi = binary_proc[y:y+h, x:x+w]
-            cnn_in, _ = preprocess_input(roi) # 鏡頭模式為了速度，暫時只用 CNN
+            cnn_in, _ = preprocess_input(roi)
             if self.model:
                 pred = self.model.predict(cnn_in, verbose=0)[0]
                 conf = np.max(pred)
@@ -182,8 +180,21 @@ class LiveProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 def run_camera_mode(erosion, dilation, min_conf):
-    with st.expander("📖 鏡頭模式使用說明 (點擊展開)", expanded=True):
-        st.markdown("1. 點擊 `START`。 2. 對準數字。 3. 系統自動框選。")
+    # [新增] 詳細使用說明
+    with st.expander("📖 鏡頭模式使用指南 & 注意事項 (點擊展開)", expanded=True):
+        st.markdown("""
+        ### 🎯 使用步驟
+        1. **啟動**：點擊下方 `START` 按鈕，瀏覽器會請求攝影機權限，請點選「允許」。
+        2. **對準**：將寫有數字的紙張或物體，平穩地置於畫面中央。
+        3. **判讀**：系統會即時框選看到的數字，並顯示綠色框框與編號。
+
+        ### ⚠️ 注意事項與技巧
+        * **💡 光線是關鍵**：請確保環境**光線充足**。太暗或有強烈陰影（例如手機遮住光線）會導致誤判。
+        * **💡 背景要乾淨**：最理想的情況是 **「白紙黑字」**。如果背景太雜亂（例如有格子、花紋），系統可能會混淆。
+        * **💡 距離要適中**：數字太小（離鏡頭太遠）會看不清楚；數字太大（爆框）也會無法辨識。
+        * **💡 避免手震**：手持鏡頭時請盡量保持穩定，模糊的影像會讓 AI 看成一團霧。
+        """)
+
     st.info("📷 鏡頭模式 (為求流暢，此模式主要使用 CNN)")
     ctx = webrtc_streamer(
         key="v65-cam",
@@ -198,8 +209,22 @@ def run_camera_mode(erosion, dilation, min_conf):
 # 3. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
-    with st.expander("📖 手寫板模式使用說明", expanded=False):
-        st.markdown("直接書寫，可使用復原或橡皮擦。")
+    # [新增] 詳細使用說明
+    with st.expander("📖 手寫板模式使用指南 & 注意事項 (點擊展開)", expanded=True):
+        st.markdown("""
+        ### 🎯 使用步驟
+        1. **書寫**：在下方的黑色畫布區，用滑鼠或觸控筆直接寫下 0-9 的數字。
+        2. **工具**：
+            * **✏️ 畫筆**：預設工具，用來寫字。
+            * **🧽 橡皮擦**：擦掉寫錯的部分。
+            * **↩️ 復原一筆**：寫壞了？按一下稍微回溯，不用全部重寫。
+            * **🗑️ 清除全部**：一鍵清空畫布，重新開始。
+        
+        ### ⚠️ 注意事項與技巧
+        * **💡 字體端正**：雖然 AI 看得懂潦草字，但寫得端正準確度最高。
+        * **💡 不要黏在一起**：請將每個數字分開寫，**不要連筆**或重疊，否則 AI 會把它們看成同一個奇怪的符號。
+        * **💡 筆劃完整**：例如數字 `0` 或 `8`，請盡量把圈圈封好，不要留太大的缺口。
+        """)
 
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
     if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
@@ -262,7 +287,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             
             for i, (x, y, w, h) in enumerate(boxes):
                 roi = processed[y:y+h, x:x+w]
-                cnn_in, _ = preprocess_input(roi) # 手寫板環境單純，用 CNN 即可
+                cnn_in, _ = preprocess_input(roi)
                 
                 pred = cnn_model.predict(cnn_in, verbose=0)[0]
                 conf = np.max(pred)
@@ -283,10 +308,28 @@ def run_canvas_mode(erosion, dilation, min_conf):
 # 4. 上傳模式 (整合 CNN + KNN 雙重驗證)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
-    with st.expander("📖 圖片上傳指南", expanded=True):
-        st.markdown("已啟用 **CNN + KNN 雙重驗證**，能大幅減少將國字誤判為數字的情況。")
+    # [新增] 詳細使用說明
+    with st.expander("📖 上傳模式使用指南 & 疑難排解 (點擊展開)", expanded=True):
+        st.markdown("""
+        ### 🎯 使用步驟
+        1. **上傳**：點擊 `Browse files` 選擇一張含有數字的圖片 (JPG/PNG)。
+        2. **等待**：系統會自動進行影像處理、切割、與雙重模型驗證。
+        3. **檢視**：圖片上會顯示綠色框與編號，右側清單會列出詳細結果。
 
-    st.info("✅ 雙重驗證模式：如果 CNN 和 KNN 意見不合，系統會嚴格過濾")
+        ### ⚠️ 為什麼有些字沒抓到？(系統過濾機制)
+        為了避免把「國字」、「插圖」或「陰影」誤判成數字，本模式啟用了 **嚴格過濾**：
+        * **🚫 形狀不對**：如果框框太細長（像 "l"）或太寬扁（像 "一"），會被視為雜訊。
+        * **🚫 結構太複雜**：系統會掃描筆畫，如果發現線條縱橫交錯（像「法」、「則」等中文字），會直接忽略。
+        * **🚫 密度異常**：如果一個框框裡黑色填滿的比例太高（像實心方塊）或太低（像空心圓圈），也會被過濾。
+        * **🚫 雙重驗證失敗**：如果 **CNN** 模型說是 8，但 **KNN** 模型說是 6，系統會判定為「有爭議」並扣分，信心不足就會隱藏。
+
+        ### 💡 提升準確率的小撇步
+        * 盡量使用 **白底黑字** 的圖片。
+        * 如果字黏在一起，試著調整左側的 **「切割沾黏 (Erosion)」** 參數。
+        * 如果字筆畫斷掉，試著調整左側的 **「筆畫加粗 (Dilation)」** 參數。
+        """)
+
+    st.info("✅ 已啟用【雙重模型驗證】+【結構複雜度過濾】，強力排除非數字干擾")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -326,32 +369,25 @@ def run_upload_mode(erosion, dilation, min_conf):
             max_strokes = check_multiline_complexity(roi_check)
             if max_strokes > 3: continue 
             
-            # ============================================
-            # 🧠 雙重模型預測 (CNN + KNN)
-            # ============================================
+            # 雙重模型預測
             roi = processed[y:y+h, x:x+w]
             cnn_in, knn_in = preprocess_input(roi)
             
-            # 1. CNN 預測
             pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
             conf_cnn = np.max(pred_cnn)
             lbl_cnn = np.argmax(pred_cnn)
             
-            # 2. KNN 預測 (如果模型存在)
             lbl_knn = -1
             if knn_model:
                 lbl_knn = knn_model.predict(knn_in)[0]
             
-            # 3. 雙重驗證邏輯
-            # 如果 CNN 和 KNN 答案不同，代表這個圖案很模糊或有爭議 -> 大幅扣分
             final_conf = conf_cnn
             is_disagree = False
             
             if knn_model and lbl_cnn != lbl_knn:
-                final_conf -= 0.30 # 意見不合，扣 30% 信心
+                final_conf -= 0.30 
                 is_disagree = True
             
-            # 4. 其他幾何過濾 (同之前)
             holes = count_holes(roi)
             if lbl_cnn != 1 and aspect_ratio < 0.35: continue
             if lbl_cnn == 1 and aspect_ratio > 0.6: continue
@@ -361,10 +397,9 @@ def run_upload_mode(erosion, dilation, min_conf):
             target_thresh = min_conf
             if lbl_cnn in [4, 7]: target_thresh += 0.20
             
-            # 5. 最終判定
             if final_conf > target_thresh:
                 status_note = ""
-                if is_disagree: status_note = " (爭議)" # 雖然通過但有爭議
+                if is_disagree: status_note = " (⚠️爭議)"
                 
                 valid_boxes_data.append({
                     'rect': (x, y, w, h),
@@ -402,13 +437,27 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (Dual Verify)")
+    st.sidebar.title("🔢 手寫辨識 (Guide Ver.)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔪 V65 手術刀參數")
-    with st.sidebar.expander("❓ 參數說明"):
-        st.markdown("調整 Erosion 切割沾黏字，Dilation 修補斷字。")
+    
+    # 詳細的參數調整指南
+    with st.sidebar.expander("❓ 參數調整指南"):
+        st.markdown("""
+        **1. 切割沾黏 (Erosion)**
+        * **功能**：把變粗的線條「削細」。
+        * **何時用**：當兩個數字靠太近，被框在同一個框框時，**調大**此數值。
+        
+        **2. 筆畫加粗 (Dilation)**
+        * **功能**：把變細的線條「變粗」。
+        * **何時用**：當一個數字斷成兩截 (例如 5 的上面斷掉)，被認成兩個字時，**調大**此數值。
+        
+        **3. 信心門檻**
+        * **功能**：AI 多有把握才敢顯示出來。
+        * **何時用**：畫面雜訊太多、出現很多誤判時，**調高**此值；字都抓不到時，**調低**此值。
+        """)
 
     erosion_iter = st.sidebar.slider("切割沾黏 (Erosion)", 0, 5, 0)
     dilation_iter = st.sidebar.slider("筆畫加粗 (Dilation)", 0, 3, 2)
