@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V74 Spotless)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V75 Cleanest)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -77,7 +77,6 @@ cnn_model, knn_model, svm_model = load_models()
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
     
-    # 鉛筆字模式：不做腐蝕，只做閉運算接斷線
     if erosion > 0:
         kernel = np.ones((3,3), np.uint8)
         res = cv2.erode(res, kernel, iterations=erosion)
@@ -320,16 +319,16 @@ def run_canvas_mode(erosion, dilation, min_conf):
             with result_container: st.info("請在左側書寫...")
 
 # ==========================================
-# 4. 上傳模式 (針對極小雜訊進行過濾)
+# 4. 上傳模式 (V75 極致降噪)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     with st.expander("📖 上傳模式使用指南", expanded=True):
         st.markdown("""
         **1. 上傳**：選擇圖片。 **2. 檢視**：系統會自動過濾雜訊並辨識。
-        * **新功能**：已針對鉛筆字與陰影進行強力降噪處理。
+        * **新功能**：針對微小雜訊 (如 #11) 進行了更嚴格的尺寸過濾。
         """)
 
-    st.info("✅ 已啟用【V74 降噪增強引擎】，可辨識陰影下的鉛筆字")
+    st.info("✅ 已啟用【V75 極致降噪引擎】，可辨識陰影下的鉛筆字")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -339,17 +338,14 @@ def run_upload_mode(erosion, dilation, min_conf):
         h_orig, w_orig = img_origin.shape[:2]
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # 高斯模糊 (磨皮)
+        # 1. 磨皮
         blur = cv2.GaussianBlur(gray, (9, 9), 0)
-        
-        # CLAHE 對比度增強
+        # 2. 提亮
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         enhanced_gray = clahe.apply(blur)
-        
-        # 自適應閥值
+        # 3. 自適應二值化
         binary = cv2.adaptiveThreshold(enhanced_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 10)
-        
-        # 形態學處理
+        # 4. 形態學
         processed = v65_morphology(binary, erosion, dilation)
         
         cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -359,15 +355,16 @@ def run_upload_mode(erosion, dilation, min_conf):
         
         for c in cnts:
             area = cv2.contourArea(c)
-            # [修正] 雜訊過濾門檻從 100 提高到 120，殺掉 #11 那個小點
-            if area < 120: continue 
+            # [修正 1] 面積門檻拉高到 180 (殺掉較大的雜訊塊)
+            if area < 180: continue 
             
             x, y, w, h = cv2.boundingRect(c)
             
-            # [修正] 增加長寬過濾：太扁(雜訊點)或太細(灰塵)都殺掉
-            if w < 5 or h < 10: continue
+            # [修正 2] 尺寸雙重鎖定：如果寬度小於 25 且 高度小於 25，直接判定為雜訊點
+            # 真正的數字一定會有一邊比較長 (1很高, 0很寬)
+            if w < 25 and h < 25: continue
             
-            # 排除太誇張的長條
+            # 排除紙張邊緣長條
             if w * h > (h_orig * w_orig * 0.9): continue
             
             roi = processed[y:y+h, x:x+w]
@@ -412,7 +409,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (V74 Spotless)")
+    st.sidebar.title("🔢 手寫辨識 (V75 Cleanest)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
