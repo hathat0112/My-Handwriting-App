@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Final Clean)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Anti-Noise)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -176,7 +176,8 @@ class LiveProcessor(VideoProcessorBase):
         cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         boxes_data = []
         for c in cnts:
-            if cv2.contourArea(c) < 100: continue
+            # [修正] 提高面積門檻：小於 300 像素的雜訊直接忽略 (之前是 100)
+            if cv2.contourArea(c) < 300: continue
             x, y, w, h = cv2.boundingRect(c)
             if x<5 or y<5: continue
             boxes_data.append((x,y,w,h))
@@ -274,7 +275,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             height=400, width=650, drawing_mode="freedraw",
             initial_drawing=st.session_state['initial_drawing'],
             key=st.session_state.get('canvas_key', 'canvas_0'),
-            display_toolbar=False # [修改] 隱藏內建工具列 (因為我們已經有自訂按鈕了)
+            display_toolbar=False 
         )
         if canvas_res.json_data is not None: st.session_state['canvas_json'] = canvas_res.json_data
     
@@ -293,7 +294,10 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 st.image(processed, caption="二值化影像", use_container_width=True)
             
             cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            boxes = sorted([cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 50], key=lambda b: b[0])
+            
+            # [修正] 過濾太小的雜訊 (小於 300 像素的不算字)
+            boxes = sorted([cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 300], key=lambda b: b[0])
+            
             draw_img = img_bgr.copy()
             results_list = []
             
@@ -352,8 +356,8 @@ def run_upload_mode(erosion, dilation, min_conf):
         valid_boxes_data = []
         
         for c in cnts:
-            area = cv2.contourArea(c)
-            if area < 100: continue 
+            # [修正] 上傳模式也同步提高門檻，避免小黑點雜訊
+            if cv2.contourArea(c) < 300: continue 
             x, y, w, h = cv2.boundingRect(c)
             
             if x < 10 or y < 10 or (x+w) > w_orig-10 or (y+h) > h_orig-10: continue
@@ -450,7 +454,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (Guide Ver.)")
+    st.sidebar.title("🔢 手寫辨識 (Final Clean)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
