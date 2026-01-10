@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V67 Sequential)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V68 Final)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -120,7 +120,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# 投票機制
+# [升級] 投票機制：回傳詳細資訊
 def ensemble_predict(roi, min_conf):
     cnn_in, flat_in = preprocess_input(roi)
     
@@ -146,16 +146,19 @@ def ensemble_predict(roi, min_conf):
     vote_count = votes.count(final_lbl)
     
     final_conf = conf_cnn
+    details = ""
     
-    # 判決邏輯
     if vote_count == len(votes):
         final_conf = min(1.0, final_conf + 0.1)
     elif vote_count >= 2:
-        if lbl_cnn != final_lbl: final_conf -= 0.15
+        if lbl_cnn != final_lbl:
+            final_conf -= 0.15
+            details = f" (CNN:{lbl_cnn}跑票)"
     else:
         final_conf -= 0.3
+        details = f" (分歧: C{lbl_cnn}/K{lbl_knn}/S{lbl_svm})"
         
-    return final_lbl, final_conf
+    return final_lbl, final_conf, details
 
 # ==========================================
 # 2. 鏡頭模式
@@ -196,11 +199,10 @@ class LiveProcessor(VideoProcessorBase):
             if self.model:
                 pred = self.model.predict(cnn_in, verbose=0)[0]
                 conf = np.max(pred)
-                
                 if conf > self.min_conf:
                     cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
                     draw_label(img, f"#{count_id}", x, y)
-                    count_id += 1 # 只有畫出來才+1
+                    count_id += 1
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -218,14 +220,14 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 手寫板模式
+# 3. 手寫板模式 (顯示投票細節)
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     with st.expander("📖 手寫板使用說明 (點擊展開)", expanded=False):
         st.markdown("""
         * **書寫**：在下方直接寫字。
         * **修正**：使用復原或橡皮擦。
-        * **辨識**：已啟用三重驗證與筆畫融合。
+        * **辨識**：已啟用三重驗證，若模型意見不合會在清單中顯示。
         """)
 
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
@@ -279,8 +281,8 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            # 筆畫融合
-            merge_kernel = np.ones((10, 10), np.uint8) 
+            # [微調] 融合力道降為 6x6，保留更多細節，避免 L 變成 blob
+            merge_kernel = np.ones((6, 6), np.uint8) 
             merged_mask = cv2.dilate(processed, merge_kernel, iterations=2)
             cnts, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
@@ -288,7 +290,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             for c in cnts:
                 area = cv2.contourArea(c)
                 x, y, w, h = cv2.boundingRect(c)
-                # 寬鬆門檻：Area 150 以上都算
+                # 寬鬆門檻
                 if area < 150: continue 
                 if h < 15 or w < 5: continue 
                 valid_boxes.append((x,y,w,h))
@@ -296,19 +298,18 @@ def run_canvas_mode(erosion, dilation, min_conf):
             boxes = sorted(valid_boxes, key=lambda b: b[0])
             draw_img = img_bgr.copy()
             results_list = []
-            
-            # [修正重點] 使用獨立計數器，不依賴 loop index
-            valid_count = 1 
+            valid_count = 1
             
             for i, (x, y, w, h) in enumerate(boxes):
                 roi = processed[y:y+h, x:x+w]
-                final_lbl, final_conf = ensemble_predict(roi, min_conf)
+                final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
                 
                 if final_conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    # 使用 valid_count 而不是 i+1
                     draw_label(draw_img, f"#{valid_count}", x, y)
-                    results_list.append({"編號": f"#{valid_count}", "預測數字": str(final_lbl), "信心度": f"{int(final_conf*100)}%"})
+                    # 顯示預測結果與細節 (是否有爭議)
+                    status_text = f"{int(final_conf*100)}%{details}"
+                    results_list.append({"編號": f"#{valid_count}", "預測數字": str(final_lbl), "狀態": status_text})
                     valid_count += 1
             
             st.image(draw_img, caption="編號對照圖", channels="BGR", use_container_width=True)
@@ -353,22 +354,20 @@ def run_upload_mode(erosion, dilation, min_conf):
             if cv2.contourArea(c) < 200: continue 
             x, y, w, h = cv2.boundingRect(c)
             if x < 10 or y < 10 or (x+w) > w_orig-10 or (y+h) > h_orig-10: continue
-            if w * h > (h_orig * w_orig * 0.15): continue
             
             roi = processed[y:y+h, x:x+w]
-            final_lbl, final_conf = ensemble_predict(roi, min_conf)
+            final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
             
             if final_conf > min_conf:
                 valid_boxes_data.append({
                     'rect': (x, y, w, h),
                     'lbl': final_lbl,
-                    'conf': final_conf
+                    'conf': final_conf,
+                    'details': details
                 })
 
         valid_boxes_data.sort(key=lambda item: (item['rect'][1]//50, item['rect'][0]))
         results_list = []
-
-        # [修正重點] 使用獨立計數器
         valid_count = 1
 
         for idx, item in enumerate(valid_boxes_data):
@@ -377,9 +376,8 @@ def run_upload_mode(erosion, dilation, min_conf):
             conf = item['conf']
             
             cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
-            # 使用 valid_count
             draw_label(display_img, f"#{valid_count}", x, y)
-            results_list.append(f"**#{valid_count}**: 數字 `{lbl}` ({int(conf*100)}%)")
+            results_list.append(f"**#{valid_count}**: 數字 `{lbl}` ({int(conf*100)}%){item['details']}")
             valid_count += 1
             detected_count += 1
 
@@ -399,7 +397,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (V67 Sequential)")
+    st.sidebar.title("🔢 手寫辨識 (V68 Final)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
