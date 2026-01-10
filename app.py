@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V69 Final)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V70 Balanced)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -120,7 +120,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# 投票機制 (用語優化版)
+# 投票機制
 def ensemble_predict(roi, min_conf):
     cnn_in, flat_in = preprocess_input(roi)
     
@@ -153,7 +153,6 @@ def ensemble_predict(roi, min_conf):
     elif vote_count >= 2:
         if lbl_cnn != final_lbl:
             final_conf -= 0.15
-            # [修改] 拿掉"跑票"，改用更中性的表達
             details = f" (CNN:{lbl_cnn})"
     else:
         final_conf -= 0.3
@@ -282,8 +281,9 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            # 融合力道 6x6
-            merge_kernel = np.ones((6, 6), np.uint8) 
+            # [修正] 降低預設融合力道，從 6x6 降為 4x4
+            # 這樣可以避免太靠近的字被黏在一起，但還是能救回稍微斷掉的字
+            merge_kernel = np.ones((4, 4), np.uint8) 
             merged_mask = cv2.dilate(processed, merge_kernel, iterations=2)
             cnts, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
@@ -396,23 +396,24 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (V69 Final)")
+    st.sidebar.title("🔢 手寫辨識 (V70 Balanced)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔪 V65 手術刀參數")
     
+    # 增加針對「沾黏」的提示
     with st.sidebar.expander("❓ 參數調整指南"):
         st.markdown("""
         **1. 切割沾黏 (Erosion)**
         * **功能**：把變粗的線條「削細」。
+        * **💡 必殺技**：如果兩個數字黏在一起，請把這個調大！
         
         **2. 筆畫加粗 (Dilation)**
         * **功能**：把變細的線條「變粗」。
         
         **3. 信心門檻**
         * **功能**：AI 多有把握才敢顯示出來。
-        * **設定**：預設已降至 **0.5** 以確保不漏字。
         """)
 
     erosion_iter = st.sidebar.slider("切割沾黏 (Erosion)", 0, 5, 0)
