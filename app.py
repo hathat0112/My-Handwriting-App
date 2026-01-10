@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Anti-Ghost)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Stroke Fusion)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -33,7 +33,7 @@ def load_models():
                 break
             except: pass
     
-    # 2. KNN & SVM 訓練資料
+    # 2. 訓練資料 (KNN/SVM)
     x_flat = None
     y_train = None
     try:
@@ -42,7 +42,7 @@ def load_models():
         y_train = y_raw[:10000]
     except: pass
 
-    # 2. KNN
+    # 3. KNN
     knn = None
     knn_path = "knn_model.pkl"
     if os.path.exists(knn_path):
@@ -56,7 +56,7 @@ def load_models():
             joblib.dump(knn, knn_path)
         except: pass
 
-    # 3. SVM
+    # 4. SVM
     svm = None
     svm_path = "svm_model.pkl"
     if os.path.exists(svm_path):
@@ -210,11 +210,11 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 手寫板模式 (強化版)
+# 3. 手寫板模式 (加入筆畫融合)
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     with st.expander("📖 手寫板模式使用說明 (點擊展開)", expanded=False):
-        st.markdown("直接書寫，使用工具列修改，右側查看結果。")
+        st.markdown("直接書寫，系統會自動將斷開的筆畫合併辨識。")
 
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
     if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
@@ -267,25 +267,22 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # [核心修改] 筆畫融合 (Stroke Fusion)
+            # 建立一個「融合遮罩」，用力膨脹以黏合斷字
+            merge_kernel = np.ones((15, 15), np.uint8) 
+            merged_mask = cv2.dilate(processed, merge_kernel, iterations=2)
+            
+            # 在「融合後」的遮罩上找輪廓 -> 這樣 3 的上下兩半就會被算成一個框
+            cnts, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             valid_boxes = []
-            
-            # [修正重點] 這裡加入嚴格的形狀過濾
             for c in cnts:
                 area = cv2.contourArea(c)
                 x, y, w, h = cv2.boundingRect(c)
                 
-                # 1. 面積過濾：太小的雜點 (白點) 殺掉
-                # 手寫板解析度高，所以門檻設高一點 (600)
-                if area < 600: continue
-                
-                # 2. 尺寸過濾：太矮或太窄的殺掉
+                # 過濾：因為融合過，面積門檻要拉高一點 (800)
+                if area < 800: continue
                 if h < 40 or w < 20: continue
-                
-                # 3. 長寬比過濾：太扁的 (像橫線) 殺掉
-                aspect_ratio = w / float(h)
-                if aspect_ratio > 3.0: continue # 寬度是高度的3倍以上 -> 橫線
                 
                 valid_boxes.append((x,y,w,h))
             
@@ -294,6 +291,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             results_list = []
             
             for i, (x, y, w, h) in enumerate(boxes):
+                # 裁切時，我們還是切「原本清晰的圖 (processed)」，不要切模糊的遮罩
                 roi = processed[y:y+h, x:x+w]
                 cnn_in, _ = preprocess_input(roi)
                 pred = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -317,8 +315,8 @@ def run_canvas_mode(erosion, dilation, min_conf):
 # 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
-    with st.expander("📖 上傳模式使用指南", expanded=True):
-        st.markdown("上傳圖片，系統會使用三模型驗證並排除雜訊。")
+    with st.expander("📖 上傳模式使用指南 & 疑難排解 (點擊展開)", expanded=True):
+        st.markdown("上傳圖片，系統會自動進行影像處理、切割、與雙重模型驗證。")
 
     st.info("✅ 已啟用【CNN + KNN + SVM】黃金三角驗證，準確度大幅提升")
     
@@ -438,7 +436,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (Anti-Ghost)")
+    st.sidebar.title("🔢 手寫辨識 (Stroke Fusion)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
