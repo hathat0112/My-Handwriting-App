@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V68 Final)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V69 Final)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -120,7 +120,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [升級] 投票機制：回傳詳細資訊
+# 投票機制 (用語優化版)
 def ensemble_predict(roi, min_conf):
     cnn_in, flat_in = preprocess_input(roi)
     
@@ -153,7 +153,8 @@ def ensemble_predict(roi, min_conf):
     elif vote_count >= 2:
         if lbl_cnn != final_lbl:
             final_conf -= 0.15
-            details = f" (CNN:{lbl_cnn}跑票)"
+            # [修改] 拿掉"跑票"，改用更中性的表達
+            details = f" (CNN:{lbl_cnn})"
     else:
         final_conf -= 0.3
         details = f" (分歧: C{lbl_cnn}/K{lbl_knn}/S{lbl_svm})"
@@ -220,7 +221,7 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 手寫板模式 (顯示投票細節)
+# 3. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     with st.expander("📖 手寫板使用說明 (點擊展開)", expanded=False):
@@ -281,7 +282,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            # [微調] 融合力道降為 6x6，保留更多細節，避免 L 變成 blob
+            # 融合力道 6x6
             merge_kernel = np.ones((6, 6), np.uint8) 
             merged_mask = cv2.dilate(processed, merge_kernel, iterations=2)
             cnts, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -290,7 +291,6 @@ def run_canvas_mode(erosion, dilation, min_conf):
             for c in cnts:
                 area = cv2.contourArea(c)
                 x, y, w, h = cv2.boundingRect(c)
-                # 寬鬆門檻
                 if area < 150: continue 
                 if h < 15 or w < 5: continue 
                 valid_boxes.append((x,y,w,h))
@@ -307,7 +307,6 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 if final_conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
                     draw_label(draw_img, f"#{valid_count}", x, y)
-                    # 顯示預測結果與細節 (是否有爭議)
                     status_text = f"{int(final_conf*100)}%{details}"
                     results_list.append({"編號": f"#{valid_count}", "預測數字": str(final_lbl), "狀態": status_text})
                     valid_count += 1
@@ -397,7 +396,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (V68 Final)")
+    st.sidebar.title("🔢 手寫辨識 (V69 Final)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
