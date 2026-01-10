@@ -13,15 +13,14 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V65 Robust)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V65 Super Strict)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
-# 1. 共用核心 (Shared Core) - 所有模式通用
+# 1. 共用核心 (Shared Core)
 # ==========================================
 @st.cache_resource
 def load_models():
-    """載入 CNN 主模型與 KNN 輔助模型"""
     cnn = None
     model_files = ["cnn_model_robust.h5", "mnist_cnn.h5", "cnn_model.h5"]
     for f in model_files:
@@ -50,11 +49,9 @@ def load_models():
         
     return cnn, knn
 
-# 初始化模型
 cnn_model, knn_model = load_models()
 
 def v65_morphology(binary_img, erosion, dilation):
-    """[V65 核心] 形態學處理"""
     res = binary_img.copy()
     if erosion > 0:
         kernel = np.ones((3,3), np.uint8)
@@ -66,7 +63,6 @@ def v65_morphology(binary_img, erosion, dilation):
     return res
 
 def center_by_moments(img):
-    """影像重心置中"""
     m = cv2.moments(img, True)
     if m['m00'] < 0.1: return cv2.resize(img, (28, 28))
     cX, cY = m['m10'] / m['m00'], m['m01'] / m['m00']
@@ -75,7 +71,6 @@ def center_by_moments(img):
     return cv2.warpAffine(img, M, (28, 28), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 def preprocess_input(roi):
-    """預處理 ROI"""
     h, w = roi.shape
     scale = 20.0 / max(h, w)
     nh, nw = max(1, int(h * scale)), max(1, int(w * scale))
@@ -86,8 +81,20 @@ def preprocess_input(roi):
     final = center_by_moments(canvas)
     return final.reshape(1, 28, 28, 1).astype('float32') / 255.0
 
+def count_holes(binary_roi):
+    """計算二值化圖像中的孔洞數量 (拓撲特徵)"""
+    contours, hierarchy = cv2.findContours(binary_roi, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    holes = 0
+    if hierarchy is not None:
+        # hierarchy 結構: [Next, Previous, First_Child, Parent]
+        # 如果 Parent != -1，代表這是內輪廓 (洞)
+        for h in hierarchy[0]:
+            if h[3] != -1:
+                holes += 1
+    return holes
+
 # ==========================================
-# 2. 模式 A: 鏡頭模式專用邏輯 (Live Camera)
+# 2. 模式 A: 鏡頭模式
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -146,7 +153,7 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 模式 B: 手寫板專用邏輯 (Canvas)
+# 3. 模式 B: 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     c1, c2 = st.columns([2, 1])
@@ -163,8 +170,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
         )
     
     with c2:
-        st.markdown("### 辨識結果") # 標題乾淨 (無圖示)
-        
+        st.markdown("### 辨識結果")
         if canvas_res.image_data is not None and np.max(canvas_res.image_data) > 0:
             raw = canvas_res.image_data.astype(np.uint8)
             img_bgr = cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR) if raw.shape[2] == 4 else raw
@@ -173,7 +179,6 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            # [Debug] 顯示 AI 看到的影像
             st.image(processed, caption="[Debug] AI 視角", width=200)
             
             cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -196,10 +201,10 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 st.warning("寫得太潦草或信心過低")
 
 # ==========================================
-# 4. 模式 C: 上傳圖片專用邏輯 (Upload) - 準確度增強版
+# 4. 模式 C: 上傳圖片 - 超強過濾版
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
-    st.info("支援 JPG/PNG，系統會自動框選數字")
+    st.info("支援 JPG/PNG，已啟用【孔洞偵測】來過濾中文字與陰影")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -211,13 +216,9 @@ def run_upload_mode(erosion, dilation, min_conf):
         # 1. 影像增強
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # 2. 雙重二值化 (Dual Thresholding) - 對抗陰影與雜訊
-        # A計畫: 自適應 (抓細節)
+        # 2. 雙重二值化 (Dual Thresholding)
         thresh_adapt = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 25, 10)
-        # B計畫: Otsu (抓主體)
         _, thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        # 取交集：大幅減少雜訊
         binary_combined = cv2.bitwise_and(thresh_adapt, thresh_otsu)
         
         # V65 形態學
@@ -233,28 +234,23 @@ def run_upload_mode(erosion, dilation, min_conf):
             x, y, w, h = cv2.boundingRect(c)
             
             # ==========================================
-            # 🛑 準確度優化過濾器 (Accuracy Filters)
+            # 🛑 第一階段：物理尺寸過濾
             # ==========================================
-            # 1. 邊緣過濾
-            if x < 5 or y < 5 or (x+w) > w_orig-5 or (y+h) > h_orig-5: continue
-
-            # 2. 長寬比 (中文字通常是正方形，數字通常瘦長)
+            if x < 5 or y < 5 or (x+w) > w_orig-5 or (y+h) > h_orig-5: continue # 邊緣
+            
             aspect_ratio = w / float(h)
-            if aspect_ratio > 1.2: continue # 太寬
-            if aspect_ratio < 0.15: continue # 太細 (雜訊線條)
-
-            # 3. 巨大物件
-            if w * h > (h_orig * w_orig * 0.1): continue 
-
-            # 4. 【關鍵】密度過濾 (Density Check)
-            # 中文字筆畫多，密度通常 > 0.55；數字通常在 0.2~0.5 之間
+            if aspect_ratio > 1.1: continue # 太寬 (通常是中文字或單詞)
+            if aspect_ratio < 0.15: continue # 太細 (通常是雜訊線條)
+            
+            if w * h > (h_orig * w_orig * 0.1): continue # 巨大物件
+            
             roi_check = processed[y:y+h, x:x+w]
             density = cv2.countNonZero(roi_check) / (w * h)
+            if density < 0.12 or density > 0.60: continue # 密度過高或過低
             
-            if density < 0.12: continue # 太空
-            if density > 0.55: continue # 太滿 (通常是中文字)
             # ==========================================
-            
+            # 🧠 模型預測
+            # ==========================================
             roi = processed[y:y+h, x:x+w]
             inp = preprocess_input(roi)
             pred = cnn_model.predict(inp, verbose=0)[0]
@@ -262,13 +258,37 @@ def run_upload_mode(erosion, dilation, min_conf):
             conf = np.max(pred)
             lbl = np.argmax(pred)
             
-            # 針對易誤判數字 (1, 7) 提高門檻
-            final_conf_thresh = min_conf
-            if lbl in [1, 7]: final_conf_thresh += 0.15
+            # ==========================================
+            # 🛑 第二階段：邏輯與特徵過濾 (Hole Check)
+            # ==========================================
+            holes = count_holes(roi)
             
+            # 規則 1: 數字 8 必須有洞
+            # 如果 AI 說是 8，但沒有洞，那通常是實心陰影或誤判
+            if lbl == 8 and holes == 0: continue
+            
+            # 規則 2: 數字 0, 6, 9 通常有洞 (偶爾手寫會封起來，所以我們只過濾極端情況)
+            # 如果 AI 說是 0 且沒洞，且信心度不高，殺掉
+            if lbl == 0 and holes == 0 and conf < 0.95: continue
+            
+            # 規則 3: 數字 1 不應該有大洞
+            if lbl == 1 and holes > 0: continue
+            
+            # 規則 4: 數字 1 必須瘦長
+            # 如果 AI 說是 1，但長寬比太胖 (> 0.5)，那通常是中文字的筆畫
+            if lbl == 1 and aspect_ratio > 0.55: continue
+
+            # 規則 5: 針對容易誤判的 4, 3, 7 提高門檻
+            # 中文字的筆畫最常被看成 4, 3, 7
+            final_conf_thresh = min_conf
+            if lbl in [3, 4, 7]: final_conf_thresh += 0.20 # 對這些數字要求超高信心
+            if lbl in [1, 8]: final_conf_thresh += 0.10
+
             if conf > final_conf_thresh:
-                # 畫框與文字 (加底色讓文字清楚)
+                # 繪圖
                 cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
+                
+                # 文字底色
                 label_text = f"{lbl}"
                 (lw, lh), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
                 cv2.rectangle(display_img, (x, y-lh-10), (x+lw, y), (0,255,0), -1)
@@ -277,7 +297,6 @@ def run_upload_mode(erosion, dilation, min_conf):
 
         img_rgb = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
         
-        # 顯示結果與 Debug 圖
         c1, c2 = st.columns([3, 1])
         with c1:
             st.image(img_rgb, use_container_width=True, caption="辨識結果")
@@ -286,7 +305,7 @@ def run_upload_mode(erosion, dilation, min_conf):
             st.markdown(f"**共找到 {detected_count} 個數字**")
 
 # ==========================================
-# 5. 主程式分流 (Main Dispatcher)
+# 5. 主程式分流
 # ==========================================
 def main():
     st.sidebar.title("🔢 手寫辨識 V65 Fix")
