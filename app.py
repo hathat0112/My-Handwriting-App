@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V77 Noise Terminator)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V78 Pencil Saver)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -77,13 +77,11 @@ cnn_model, knn_model, svm_model = load_models()
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
     
-    # [核心修改] V77 改用「開運算 (Open)」來殺雜訊
-    # 開運算 = 先腐蝕掉小點點，再膨脹回來
-    # 這對去除紙張紋路非常有效
-    kernel_noise = np.ones((3,3), np.uint8)
-    res = cv2.morphologyEx(res, cv2.MORPH_OPEN, kernel_noise, iterations=2)
+    # 一般模式的形態學處理
+    if erosion > 0:
+        kernel = np.ones((3,3), np.uint8)
+        res = cv2.erode(res, kernel, iterations=erosion)
     
-    # 然後才是原本的閉運算 (接斷線)
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=2)
     
@@ -322,16 +320,16 @@ def run_canvas_mode(erosion, dilation, min_conf):
             with result_container: st.info("請在左側書寫...")
 
 # ==========================================
-# 4. 上傳模式 (V77 雜訊終結者)
+# 4. 上傳模式 (V78 Pencil Saver)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     with st.expander("📖 上傳模式使用指南", expanded=True):
         st.markdown("""
         **1. 上傳**：選擇圖片。 **2. 檢視**：系統會自動過濾雜訊並辨識。
-        * **新功能**：已針對髒汙背景進行強力過濾，去除紙張紋路。
+        * **新功能**：專門優化鉛筆字辨識，避免筆畫被過濾。
         """)
 
-    st.info("✅ 已啟用【V77 雜訊終結者】，強效去除背景紋路")
+    st.info("✅ 已啟用【V78 鉛筆救星引擎】，確保細線條不丟失")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -339,7 +337,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
         img_origin = cv2.imdecode(file_bytes, 1)
         
-        # 圖片瘦身
+        # 1. 圖片瘦身
         h, w = img_origin.shape[:2]
         if w > 1000:
             scale = 1000 / w
@@ -347,18 +345,28 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # [核心升級 1] 中值濾波 (Median Blur)：專門殺椒鹽雜訊/紋路
-        blur = cv2.medianBlur(gray, 5)
-        
-        # CLAHE
-        clahe = cv2.createCLAHE(clipLimit=1.0, tileGridSize=(8,8)) # 稍微降低增強，避免強調雜訊
+        # 2. 磨皮
+        blur = cv2.GaussianBlur(gray, (9, 9), 0)
+        # 3. 提亮
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         enhanced_gray = clahe.apply(blur)
         
-        # 自適應閥值 (C值提高到 15，更嚴格，只抓明顯的黑)
-        binary = cv2.adaptiveThreshold(enhanced_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 15)
+        # 4. 自適應閥值 (靈敏度適中)
+        binary = cv2.adaptiveThreshold(enhanced_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 10)
         
-        # 形態學
-        processed = v65_morphology(binary, erosion, dilation)
+        # [核心修正] 鉛筆字專用形態學
+        # 絕對不做腐蝕 (Erosion)，因為鉛筆字太細了
+        # 相反，我們先做膨脹 (Dilation) 把字變粗，確保它被看見
+        
+        kernel_pencil = np.ones((3,3), np.uint8)
+        # 先加粗！
+        thick_binary = cv2.dilate(binary, kernel_pencil, iterations=1)
+        # 再接斷線
+        processed = cv2.morphologyEx(thick_binary, cv2.MORPH_CLOSE, kernel_pencil, iterations=1)
+        
+        # 使用者設定的 Dilation 還可以疊加
+        if dilation > 0:
+            processed = cv2.dilate(processed, None, iterations=dilation)
         
         cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         detected_count = 0
@@ -367,23 +375,14 @@ def run_upload_mode(erosion, dilation, min_conf):
         
         for c in cnts:
             area = cv2.contourArea(c)
-            # 面積過濾
+            # 面積過濾：因為字被加粗了，雜訊也會變大，所以門檻要適度
             if area < 150: continue 
             
             x, y, w, h = cv2.boundingRect(c)
             
-            # 尺寸雙重鎖定
+            # 尺寸過濾
             if w < 20 and h < 20: continue
-            
-            # 密度過濾：如果一個框框裡面黑壓壓一片 (>70%)，通常是雜訊塊，不是中空的數字
-            roi_check = processed[y:y+h, x:x+w]
-            total_pixels = w * h
-            black_pixels = cv2.countNonZero(roi_check)
-            if (black_pixels / total_pixels) > 0.7: continue
-
-            # 排除長條
-            h_curr, w_curr = img_origin.shape[:2]
-            if w * h > (h_curr * w_curr * 0.9): continue
+            if w * h > (h * w * 0.9): continue
             
             roi = processed[y:y+h, x:x+w]
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
@@ -416,7 +415,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         with c1:
             st.image(img_rgb, use_container_width=True, caption="辨識結果 (僅編號)")
         with c2:
-            st.image(processed, use_container_width=True, caption="[Debug] AI 視角 (強效除噪)")
+            st.image(processed, use_container_width=True, caption="[Debug] AI 視角 (已加粗)")
             st.markdown(f"**共找到 {detected_count} 個數字**")
             if results_list:
                 st.markdown("---")
@@ -427,7 +426,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (V77 Noise Terminator)")
+    st.sidebar.title("🔢 手寫辨識 (V78 Pencil Saver)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
