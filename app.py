@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V73 Clean Pencil)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V74 Spotless)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -77,12 +77,11 @@ cnn_model, knn_model, svm_model = load_models()
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
     
-    # [修正] 對於鉛筆字，我們主要做「閉運算」把斷線接起來，不做腐蝕以免字不見
+    # 鉛筆字模式：不做腐蝕，只做閉運算接斷線
     if erosion > 0:
         kernel = np.ones((3,3), np.uint8)
         res = cv2.erode(res, kernel, iterations=erosion)
     
-    # 閉運算：填補筆畫內的小洞
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=2)
     
@@ -179,7 +178,6 @@ class LiveProcessor(VideoProcessorBase):
         img = frame.to_ndarray(format="bgr24")
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
-        # 鏡頭模式維持原樣，因通常光線較好
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
         binary_proc = v65_morphology(binary, self.erosion, self.dilation)
@@ -285,7 +283,6 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            # 手寫板背景乾淨，維持 4x4 融合
             merge_kernel = np.ones((4, 4), np.uint8) 
             merged_mask = cv2.dilate(processed, merge_kernel, iterations=2)
             cnts, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -323,7 +320,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             with result_container: st.info("請在左側書寫...")
 
 # ==========================================
-# 4. 上傳模式 (專為鉛筆/陰影優化)
+# 4. 上傳模式 (針對極小雜訊進行過濾)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     with st.expander("📖 上傳模式使用指南", expanded=True):
@@ -332,7 +329,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         * **新功能**：已針對鉛筆字與陰影進行強力降噪處理。
         """)
 
-    st.info("✅ 已啟用【V73 降噪增強引擎】，可辨識陰影下的鉛筆字")
+    st.info("✅ 已啟用【V74 降噪增強引擎】，可辨識陰影下的鉛筆字")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -342,16 +339,14 @@ def run_upload_mode(erosion, dilation, min_conf):
         h_orig, w_orig = img_origin.shape[:2]
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # [核心升級 1] 高斯模糊 (磨皮)：去除紙張顆粒感，保留主要筆畫
-        # 9x9 的 kernel 可以有效抹平雜訊
+        # 高斯模糊 (磨皮)
         blur = cv2.GaussianBlur(gray, (9, 9), 0)
         
-        # [核心升級 2] CLAHE 對比度增強 (把暗處細節提亮)
+        # CLAHE 對比度增強
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         enhanced_gray = clahe.apply(blur)
         
-        # [核心升級 3] 大範圍自適應閥值 (Shadow Killer)
-        # BlockSize=51 (看很大的範圍來決定黑白)，C=10 (嚴格一點，只抓明顯的黑線)
+        # 自適應閥值
         binary = cv2.adaptiveThreshold(enhanced_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 10)
         
         # 形態學處理
@@ -364,12 +359,15 @@ def run_upload_mode(erosion, dilation, min_conf):
         
         for c in cnts:
             area = cv2.contourArea(c)
-            # [核心升級 4] 雜訊過濾：因為模糊過，雜訊會變小，真正的字會變完整
-            # 任何小於 100 的點點直接殺掉
-            if area < 100: continue 
+            # [修正] 雜訊過濾門檻從 100 提高到 120，殺掉 #11 那個小點
+            if area < 120: continue 
             
             x, y, w, h = cv2.boundingRect(c)
-            # 排除太誇張的長條 (可能是紙張邊緣)
+            
+            # [修正] 增加長寬過濾：太扁(雜訊點)或太細(灰塵)都殺掉
+            if w < 5 or h < 10: continue
+            
+            # 排除太誇張的長條
             if w * h > (h_orig * w_orig * 0.9): continue
             
             roi = processed[y:y+h, x:x+w]
@@ -414,7 +412,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (V73 Clean Pencil)")
+    st.sidebar.title("🔢 手寫辨識 (V74 Spotless)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
