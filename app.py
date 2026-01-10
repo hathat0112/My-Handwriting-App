@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Anti-Noise)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Visual IDs)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -143,7 +143,9 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     scale = 0.8
     thickness = 2
     (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
+    # 畫黑色背景讓字更清楚
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
+    # 畫黃色文字
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
 # ==========================================
@@ -176,7 +178,6 @@ class LiveProcessor(VideoProcessorBase):
         cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         boxes_data = []
         for c in cnts:
-            # [修正] 提高面積門檻：小於 300 像素的雜訊直接忽略 (之前是 100)
             if cv2.contourArea(c) < 300: continue
             x, y, w, h = cv2.boundingRect(c)
             if x<5 or y<5: continue
@@ -191,7 +192,6 @@ class LiveProcessor(VideoProcessorBase):
             if self.model:
                 pred = self.model.predict(cnn_in, verbose=0)[0]
                 conf = np.max(pred)
-                lbl = np.argmax(pred)
                 
                 if conf > self.min_conf:
                     cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
@@ -207,11 +207,6 @@ def run_camera_mode(erosion, dilation, min_conf):
         1. **啟動**：點擊下方 `START` 按鈕，瀏覽器會請求攝影機權限，請點選「允許」。
         2. **對準**：將寫有數字的紙張或物體，平穩地置於畫面中央。
         3. **判讀**：系統會即時框選看到的數字，並顯示綠色框框與編號。
-
-        ### ⚠️ 注意事項與技巧
-        * **💡 光線是關鍵**：請確保環境**光線充足**。
-        * **💡 背景要乾淨**：最理想的情況是 **「白紙黑字」**。
-        * **💡 距離要適中**：數字太小或太大都會影響辨識。
         """)
     
     st.info("📷 鏡頭模式")
@@ -225,24 +220,21 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 手寫板模式
+# 3. 手寫板模式 (顯示編號版)
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     with st.expander("📖 手寫板模式使用說明 (點擊展開)", expanded=False):
         st.markdown("""
         ### 🎯 使用步驟
         1. **書寫**：在下方的黑色畫布區，用滑鼠或觸控筆直接寫下 0-9 的數字。
-        2. **工具**：
-            * **✏️ 畫筆**：預設工具，用來寫字。
-            * **🧽 橡皮擦**：擦掉寫錯的部分。
-            * **↩️ 復原一筆**：寫壞了？按一下稍微回溯，不用全部重寫。
-            * **🗑️ 清除全部**：一鍵清空畫布，重新開始。
+        2. **工具**：左側可切換畫筆/橡皮擦，上方有復原功能。
+        3. **對照**：畫布 **右側** 會出現一張「分析圖」，上面會標示 **編號(#1, #2...)** 供您對照下方清單。
         """)
 
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
     if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
 
-    c1, c2 = st.columns([3, 1.5])
+    c1, c2 = st.columns([2, 1.5])
     
     with c1:
         st.markdown("### ✍️ 請在此書寫")
@@ -280,7 +272,8 @@ def run_canvas_mode(erosion, dilation, min_conf):
         if canvas_res.json_data is not None: st.session_state['canvas_json'] = canvas_res.json_data
     
     with c2:
-        st.markdown("### 📊 辨識清單")
+        st.markdown("### 👁️ 分析與編號")
+        # 結果容器
         result_container = st.container(height=400, border=True)
         
         if canvas_res.image_data is not None and np.max(canvas_res.image_data) > 0:
@@ -290,14 +283,12 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            with st.expander("👁️ Debug (AI 視角)"):
-                st.image(processed, caption="二值化影像", use_container_width=True)
-            
             cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            # [修正] 過濾太小的雜訊 (小於 300 像素的不算字)
+            # 過濾太小的雜點 (面積 < 300)
             boxes = sorted([cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 300], key=lambda b: b[0])
             
+            # 準備一張圖來畫框框和編號
             draw_img = img_bgr.copy()
             results_list = []
             
@@ -310,9 +301,13 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 
                 if conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    # [重點] 在這張圖上標示編號
                     draw_label(draw_img, f"#{i+1}", x, y)
                     results_list.append({"編號": f"#{i+1}", "預測數字": str(lbl), "信心度": f"{int(conf*100)}%"})
             
+            # [重點] 在右側顯示帶有編號的圖片
+            st.image(draw_img, caption="編號對照圖", channels="BGR", use_container_width=True)
+
             with result_container:
                 if results_list: st.dataframe(results_list, hide_index=True, use_container_width=True)
                 else: st.info("尚未偵測到數字")
@@ -329,10 +324,6 @@ def run_upload_mode(erosion, dilation, min_conf):
         1. **上傳**：選擇一張含有數字的圖片 (JPG/PNG)。
         2. **等待**：系統會自動進行影像處理、切割、與雙重模型驗證。
         3. **檢視**：圖片上會顯示綠色框與編號，右側清單會列出詳細結果。
-
-        ### ⚠️ 過濾機制
-        * **三重驗證**：系統同時詢問三個 AI (CNN, KNN, SVM)。如果他們意見嚴重分歧，該結果會被視為雜訊並過濾。
-        * **結構過濾**：太複雜的國字或陰影會被自動排除。
         """)
 
     st.info("✅ 已啟用【CNN + KNN + SVM】黃金三角驗證，準確度大幅提升")
@@ -356,7 +347,6 @@ def run_upload_mode(erosion, dilation, min_conf):
         valid_boxes_data = []
         
         for c in cnts:
-            # [修正] 上傳模式也同步提高門檻，避免小黑點雜訊
             if cv2.contourArea(c) < 300: continue 
             x, y, w, h = cv2.boundingRect(c)
             
@@ -454,7 +444,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (Final Clean)")
+    st.sidebar.title("🔢 手寫辨識 (Visual IDs)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
