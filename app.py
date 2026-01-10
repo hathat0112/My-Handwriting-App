@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V72 Low-Light)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V73 Clean Pencil)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -77,12 +77,12 @@ cnn_model, knn_model, svm_model = load_models()
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
     
-    # 針對鉛筆字，減少雜訊過濾的力道，以免把字擦掉
+    # [修正] 對於鉛筆字，我們主要做「閉運算」把斷線接起來，不做腐蝕以免字不見
     if erosion > 0:
         kernel = np.ones((3,3), np.uint8)
         res = cv2.erode(res, kernel, iterations=erosion)
     
-    # 閉運算：把斷掉的筆畫接起來
+    # 閉運算：填補筆畫內的小洞
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=2)
     
@@ -179,7 +179,7 @@ class LiveProcessor(VideoProcessorBase):
         img = frame.to_ndarray(format="bgr24")
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
-        # 鏡頭模式通常光線較好，維持基本處理
+        # 鏡頭模式維持原樣，因通常光線較好
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
         binary_proc = v65_morphology(binary, self.erosion, self.dilation)
@@ -285,6 +285,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
+            # 手寫板背景乾淨，維持 4x4 融合
             merge_kernel = np.ones((4, 4), np.uint8) 
             merged_mask = cv2.dilate(processed, merge_kernel, iterations=2)
             cnts, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -322,16 +323,16 @@ def run_canvas_mode(erosion, dilation, min_conf):
             with result_container: st.info("請在左側書寫...")
 
 # ==========================================
-# 4. 上傳模式 (專為暗光與鉛筆優化)
+# 4. 上傳模式 (專為鉛筆/陰影優化)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     with st.expander("📖 上傳模式使用指南", expanded=True):
         st.markdown("""
         **1. 上傳**：選擇圖片。 **2. 檢視**：系統會自動過濾雜訊並辨識。
-        * **新功能**：已增強「暗光」與「鉛筆字」的辨識能力，解決陰影問題。
+        * **新功能**：已針對鉛筆字與陰影進行強力降噪處理。
         """)
 
-    st.info("✅ 已啟用【V72 暗光增強引擎】，可辨識陰影下的鉛筆字")
+    st.info("✅ 已啟用【V73 降噪增強引擎】，可辨識陰影下的鉛筆字")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -341,15 +342,19 @@ def run_upload_mode(erosion, dilation, min_conf):
         h_orig, w_orig = img_origin.shape[:2]
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # [核心升級 1] CLAHE 對比度增強 (把暗處細節提亮)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-        enhanced_gray = clahe.apply(gray)
+        # [核心升級 1] 高斯模糊 (磨皮)：去除紙張顆粒感，保留主要筆畫
+        # 9x9 的 kernel 可以有效抹平雜訊
+        blur = cv2.GaussianBlur(gray, (9, 9), 0)
         
-        # [核心升級 2] 使用單純的 Adaptive Threshold (放棄 Otsu，因為它會被陰影誤導)
-        # blockSize=45 (大範圍參考), C=5 (高靈敏度，抓出淺色筆跡)
-        binary = cv2.adaptiveThreshold(enhanced_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 45, 5)
+        # [核心升級 2] CLAHE 對比度增強 (把暗處細節提亮)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        enhanced_gray = clahe.apply(blur)
         
-        # 形態學處理 (使用側邊欄參數)
+        # [核心升級 3] 大範圍自適應閥值 (Shadow Killer)
+        # BlockSize=51 (看很大的範圍來決定黑白)，C=10 (嚴格一點，只抓明顯的黑線)
+        binary = cv2.adaptiveThreshold(enhanced_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 10)
+        
+        # 形態學處理
         processed = v65_morphology(binary, erosion, dilation)
         
         cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -358,9 +363,13 @@ def run_upload_mode(erosion, dilation, min_conf):
         valid_boxes_data = []
         
         for c in cnts:
-            if cv2.contourArea(c) < 150: continue 
+            area = cv2.contourArea(c)
+            # [核心升級 4] 雜訊過濾：因為模糊過，雜訊會變小，真正的字會變完整
+            # 任何小於 100 的點點直接殺掉
+            if area < 100: continue 
+            
             x, y, w, h = cv2.boundingRect(c)
-            # 排除太誇張的長條
+            # 排除太誇張的長條 (可能是紙張邊緣)
             if w * h > (h_orig * w_orig * 0.9): continue
             
             roi = processed[y:y+h, x:x+w]
@@ -394,7 +403,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         with c1:
             st.image(img_rgb, use_container_width=True, caption="辨識結果 (僅編號)")
         with c2:
-            st.image(processed, use_container_width=True, caption="[Debug] AI 視角 (已增強對比)")
+            st.image(processed, use_container_width=True, caption="[Debug] AI 視角 (已降噪)")
             st.markdown(f"**共找到 {detected_count} 個數字**")
             if results_list:
                 st.markdown("---")
@@ -405,7 +414,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (V72 Low-Light)")
+    st.sidebar.title("🔢 手寫辨識 (V73 Clean Pencil)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
