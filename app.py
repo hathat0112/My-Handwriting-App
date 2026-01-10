@@ -14,11 +14,11 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Stroke Fusion)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Ultimate)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
-# 1. 共用核心
+# 1. 共用核心 (集成 CNN, KNN, SVM)
 # ==========================================
 @st.cache_resource
 def load_models():
@@ -33,7 +33,7 @@ def load_models():
                 break
             except: pass
     
-    # 2. 訓練資料 (KNN/SVM)
+    # 2. 訓練資料
     x_flat = None
     y_train = None
     try:
@@ -197,8 +197,18 @@ class LiveProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 def run_camera_mode(erosion, dilation, min_conf):
+    # [恢復] 詳細說明
     with st.expander("📖 鏡頭模式使用說明 (點擊展開)", expanded=True):
-        st.markdown("1. 點擊 `START`。 2. 對準數字。 3. 系統自動框選。")
+        st.markdown("""
+        ### 🎯 使用步驟
+        1. **啟動**：點擊下方 `START` 按鈕，允許瀏覽器使用攝影機。
+        2. **對準**：將數字置於畫面中央，保持光線充足。
+        3. **辨識**：系統會自動框選並顯示編號。
+        
+        ### ⚠️ 技巧
+        * 保持背景單純（白紙黑字效果最好）。
+        * 避免手震或反光。
+        """)
     st.info("📷 鏡頭模式")
     ctx = webrtc_streamer(
         key="v65-cam",
@@ -210,11 +220,25 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 手寫板模式 (加入筆畫融合)
+# 3. 手寫板模式 (完整版)
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
+    # [恢復] 詳細說明
     with st.expander("📖 手寫板模式使用說明 (點擊展開)", expanded=False):
-        st.markdown("直接書寫，系統會自動將斷開的筆畫合併辨識。")
+        st.markdown("""
+        ### 🎯 使用步驟
+        1. **書寫**：在下方黑色區域書寫 0-9 數字。
+        2. **工具**：
+           * **✏️ 畫筆**：寫字用。
+           * **🧽 橡皮擦**：修正用。
+           * **↩️ 復原一筆**：回到上一步。
+           * **🗑️ 清除全部**：清空畫布。
+        3. **對照**：右側會顯示「編號對照圖」與詳細清單。
+        
+        ### 💡 聰明功能
+        * **筆畫融合**：如果你寫 `3` 或 `5` 筆畫斷掉，系統會自動把它們接起來看。
+        * **抗噪點**：太小的誤觸白點會自動被忽略。
+        """)
 
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
     if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
@@ -267,12 +291,10 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            # [核心修改] 筆畫融合 (Stroke Fusion)
-            # 建立一個「融合遮罩」，用力膨脹以黏合斷字
+            # [核心] 筆畫融合技術 (解決斷字)
             merge_kernel = np.ones((15, 15), np.uint8) 
             merged_mask = cv2.dilate(processed, merge_kernel, iterations=2)
             
-            # 在「融合後」的遮罩上找輪廓 -> 這樣 3 的上下兩半就會被算成一個框
             cnts, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             valid_boxes = []
@@ -280,9 +302,11 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 area = cv2.contourArea(c)
                 x, y, w, h = cv2.boundingRect(c)
                 
-                # 過濾：因為融合過，面積門檻要拉高一點 (800)
+                # [核心] 幾何過濾 (解決雜訊)
                 if area < 800: continue
                 if h < 40 or w < 20: continue
+                aspect_ratio = w / float(h)
+                if aspect_ratio > 3.0: continue
                 
                 valid_boxes.append((x,y,w,h))
             
@@ -291,7 +315,6 @@ def run_canvas_mode(erosion, dilation, min_conf):
             results_list = []
             
             for i, (x, y, w, h) in enumerate(boxes):
-                # 裁切時，我們還是切「原本清晰的圖 (processed)」，不要切模糊的遮罩
                 roi = processed[y:y+h, x:x+w]
                 cnn_in, _ = preprocess_input(roi)
                 pred = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -315,8 +338,18 @@ def run_canvas_mode(erosion, dilation, min_conf):
 # 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
+    # [恢復] 詳細說明
     with st.expander("📖 上傳模式使用指南 & 疑難排解 (點擊展開)", expanded=True):
-        st.markdown("上傳圖片，系統會自動進行影像處理、切割、與雙重模型驗證。")
+        st.markdown("""
+        ### 🎯 使用步驟
+        1. **上傳**：選擇一張含有數字的圖片 (JPG/PNG)。
+        2. **等待**：系統自動進行影像處理與三重模型驗證。
+        3. **檢視**：查看圖片上的編號與右側詳細結果。
+        
+        ### ⚠️ 過濾機制
+        * **三重驗證**：CNN + KNN + SVM 同時投票。
+        * **結構過濾**：排除複雜國字與陰影。
+        """)
 
     st.info("✅ 已啟用【CNN + KNN + SVM】黃金三角驗證，準確度大幅提升")
     
@@ -436,7 +469,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (Stroke Fusion)")
+    st.sidebar.title("🔢 手寫辨識 (Ultimate)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
