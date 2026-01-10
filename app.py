@@ -13,7 +13,7 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Final Ultimate)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (With IDs)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -53,7 +53,6 @@ cnn_model, knn_model = load_models()
 
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
-    # 開運算去除噪點
     kernel_noise = np.ones((2,2), np.uint8)
     res = cv2.morphologyEx(res, cv2.MORPH_OPEN, kernel_noise)
 
@@ -97,30 +96,30 @@ def count_holes(binary_roi):
     return holes
 
 def check_multiline_complexity(binary_roi):
-    """
-    [升級版] 多重掃描線複雜度檢查
-    分別在 25%, 50%, 75% 的位置進行橫切與直切。
-    只要有任何一條線穿過太多筆畫 (>3)，就視為複雜文字。
-    """
     h, w = binary_roi.shape
     max_strokes = 0
-    
-    # 掃描 3 條水平線
     for r_ratio in [0.25, 0.5, 0.75]:
         row = binary_roi[int(h * r_ratio), :] / 255
-        # 計算穿越次數 (0->1 或 1->0)
         transitions = np.sum(np.abs(np.diff(row)))
         strokes = (transitions + 1) // 2
         max_strokes = max(max_strokes, strokes)
-
-    # 掃描 3 條垂直線
     for c_ratio in [0.25, 0.5, 0.75]:
         col = binary_roi[:, int(w * c_ratio)] / 255
         transitions = np.sum(np.abs(np.diff(col)))
         strokes = (transitions + 1) // 2
         max_strokes = max(max_strokes, strokes)
-        
     return max_strokes
+
+def draw_label(img, text, x, y, color=(0, 255, 255)):
+    """[新功能] 繪製帶有黑底的清楚文字標籤"""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.8
+    thickness = 2
+    (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
+    # 畫黑底背景，確保文字可讀
+    cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
+    # 畫文字
+    cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
 # ==========================================
 # 2. 鏡頭模式
@@ -152,11 +151,19 @@ class LiveProcessor(VideoProcessorBase):
         
         cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
+        # 排序：從左到右，從上到下
+        boxes_data = []
         for c in cnts:
             if cv2.contourArea(c) < 100: continue
             x, y, w, h = cv2.boundingRect(c)
             if x<5 or y<5: continue
-            
+            boxes_data.append((x,y,w,h))
+        
+        # 簡單排序 (先依 x 排序)
+        boxes_data.sort(key=lambda b: b[0])
+
+        count_id = 1
+        for (x, y, w, h) in boxes_data:
             roi = binary_proc[y:y+h, x:x+w]
             inp = preprocess_input(roi)
             if self.model:
@@ -166,7 +173,9 @@ class LiveProcessor(VideoProcessorBase):
                 
                 if conf > self.min_conf:
                     cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    cv2.putText(img, f"{lbl}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    # [修改] 顯示編號 #1, #2...
+                    draw_label(img, f"#{count_id}: {lbl}", x, y)
+                    count_id += 1
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -211,7 +220,12 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.image(processed, caption="[Debug] AI 視角", width=200)
             
             cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # 排序：從左到右
             boxes = sorted([cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 50], key=lambda b: b[0])
+            
+            # 準備繪圖的畫布 (用原始圖比較漂亮)
+            draw_img = img_bgr.copy()
             
             results_txt = []
             for i, (x, y, w, h) in enumerate(boxes):
@@ -222,7 +236,16 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 lbl = np.argmax(pred)
                 
                 if conf > min_conf:
+                    # 畫框框
+                    cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    
+                    # [修改] 畫上清楚的標籤 "#編號: 數字"
+                    draw_label(draw_img, f"#{i+1}: {lbl}", x, y)
+                    
                     results_txt.append(f"**#{i+1}**: 數字 `{lbl}` ({int(conf*100)}%)")
+            
+            # 顯示畫好框線的圖
+            st.image(draw_img, channels="BGR", use_container_width=True, caption="辨識結果 (含編號)")
             
             if results_txt:
                 for r in results_txt: st.markdown(r)
@@ -230,7 +253,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 st.warning("寫得太潦草或信心過低")
 
 # ==========================================
-# 4. 上傳模式 - 終極掃描版
+# 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     st.info("支援 JPG/PNG，已啟用【3x3網格掃描】來排除複雜國字")
@@ -242,14 +265,8 @@ def run_upload_mode(erosion, dilation, min_conf):
         img_origin = cv2.imdecode(file_bytes, 1)
         h_orig, w_orig = img_origin.shape[:2]
         
-        # 1. 影像增強
-        lab = cv2.cvtColor(img_origin, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        enhanced = cv2.cvtColor(cv2.merge((clahe.apply(l),a,b)), cv2.COLOR_LAB2BGR)
-        gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # 2. 嚴格二值化
         thresh_adapt = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 35, 15)
         _, thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         binary_combined = cv2.bitwise_and(thresh_adapt, thresh_otsu)
@@ -260,32 +277,29 @@ def run_upload_mode(erosion, dilation, min_conf):
         detected_count = 0
         display_img = img_origin.copy()
         
+        # 先收集所有合法的框，再排序賦予編號
+        valid_boxes_data = []
+        
         for c in cnts:
             area = cv2.contourArea(c)
             if area < 100: continue 
             x, y, w, h = cv2.boundingRect(c)
             
-            # 物理過濾
+            # 過濾邏輯
             if x < 10 or y < 10 or (x+w) > w_orig-10 or (y+h) > h_orig-10: continue
             if w * h > (h_orig * w_orig * 0.15): continue
             
             roi_check = processed[y:y+h, x:x+w]
             density = cv2.countNonZero(roi_check) / (w * h)
-            if density < 0.15 or density > 0.55: continue # 稍微調低密度上限，國字通常很密
+            if density < 0.15 or density > 0.55: continue 
             
             aspect_ratio = w / float(h)
             if aspect_ratio > 1.2: continue 
             if aspect_ratio < 0.15: continue
             
-            # ==========================================
-            # 🛑 核心升級：3x3 網格複雜度檢測
-            # ==========================================
-            # 數字筆畫簡單，任何一條切線通常最多遇到 3 段筆畫 (例如 8 的垂直切線)
-            # 如果超過 3 段，肯定是複雜的國字 (例如 "必", "公", "法")
             max_strokes = check_multiline_complexity(roi_check)
             if max_strokes > 3: continue 
             
-            # 模型預測
             roi = processed[y:y+h, x:x+w]
             inp = preprocess_input(roi)
             pred = cnn_model.predict(inp, verbose=0)[0]
@@ -300,23 +314,35 @@ def run_upload_mode(erosion, dilation, min_conf):
             if lbl in [8, 0, 6, 9] and holes == 0: continue
             if lbl in [1, 2, 3, 5, 7] and holes > 0: continue
 
-            # 針對容易混淆的 7 和 4 提高門檻
             final_conf_thresh = min_conf
             if lbl in [4, 7]: final_conf_thresh += 0.20
             
             if conf > final_conf_thresh:
-                cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
-                label_text = f"{lbl}"
-                (lw, lh), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-                cv2.rectangle(display_img, (x, y-lh-10), (x+lw, y), (0,255,0), -1)
-                cv2.putText(display_img, label_text, (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 2)
-                detected_count += 1
+                valid_boxes_data.append({
+                    'rect': (x, y, w, h),
+                    'lbl': lbl,
+                    'conf': conf
+                })
+
+        # 排序：由左至右，由上至下 (近似閱讀順序)
+        valid_boxes_data.sort(key=lambda item: (item['rect'][1]//50, item['rect'][0]))
+
+        # 繪製
+        for idx, item in enumerate(valid_boxes_data):
+            x, y, w, h = item['rect']
+            lbl = item['lbl']
+            
+            cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
+            
+            # [修改] 繪製 "#編號: 數字"
+            draw_label(display_img, f"#{idx+1}: {lbl}", x, y)
+            detected_count += 1
 
         img_rgb = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
         
         c1, c2 = st.columns([3, 1])
         with c1:
-            st.image(img_rgb, use_container_width=True, caption="辨識結果")
+            st.image(img_rgb, use_container_width=True, caption="辨識結果 (含編號)")
         with c2:
             st.image(processed, use_container_width=True, caption="[Debug] AI 視角")
             st.markdown(f"**共找到 {detected_count} 個數字**")
@@ -325,14 +351,13 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 Ultimate")
+    st.sidebar.title("🔢 手寫辨識 (IDs)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔪 V65 手術刀參數")
     erosion_iter = st.sidebar.slider("切割沾黏 (Erosion)", 0, 5, 0, help="數字黏在一起時調大這個")
     dilation_iter = st.sidebar.slider("筆畫加粗 (Dilation)", 0, 3, 2, help="筆畫太細時調大這個")
-    # [V65] 預設信心提高到 0.80，強迫 AI 要很有把握才顯示
     min_conf = st.sidebar.slider("信心門檻", 0.0, 1.0, 0.80) 
 
     if cnn_model is None:
