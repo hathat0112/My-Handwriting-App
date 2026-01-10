@@ -13,7 +13,7 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Clean+Undo)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Dual Verify)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -21,6 +21,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 # ==========================================
 @st.cache_resource
 def load_models():
+    # 1. 載入 CNN (主模型)
     cnn = None
     model_files = ["cnn_model_robust.h5", "mnist_cnn.h5", "cnn_model.h5"]
     for f in model_files:
@@ -31,20 +32,25 @@ def load_models():
                 break
             except: pass
     
+    # 2. 載入或訓練 KNN (輔助模型)
     knn = None
     knn_path = "knn_model.pkl"
     if os.path.exists(knn_path):
         try:
             knn = joblib.load(knn_path)
+            print("✅ KNN 模型載入成功")
         except: pass
     
     if knn is None:
+        st.toast("正在訓練輔助用 KNN 模型 (初次執行較慢)...")
         try:
             (x_train, y_train), _ = mnist.load_data()
+            # 扁平化處理供 KNN 使用
             x_flat = x_train.reshape(-1, 784) / 255.0
-            knn = KNeighborsClassifier(n_neighbors=3)
-            knn.fit(x_flat[:5000], y_train[:5000])
+            knn = KNeighborsClassifier(n_neighbors=5) # 5個鄰居投票
+            knn.fit(x_flat[:10000], y_train[:10000]) # 用 1萬筆資料訓練比較快
             joblib.dump(knn, knn_path)
+            print("✅ KNN 模型訓練完成")
         except: pass
         
     return cnn, knn
@@ -84,7 +90,10 @@ def preprocess_input(roi):
     y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
     canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
     final = center_by_moments(canvas)
-    return final.reshape(1, 28, 28, 1).astype('float32') / 255.0
+    # 回傳兩種格式：CNN用的 (1,28,28,1) 和 KNN用的 (1, 784)
+    cnn_in = final.reshape(1, 28, 28, 1).astype('float32') / 255.0
+    knn_in = final.reshape(1, 784).astype('float32') / 255.0
+    return cnn_in, knn_in
 
 def count_holes(binary_roi):
     contours, hierarchy = cv2.findContours(binary_roi, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
@@ -111,7 +120,6 @@ def check_multiline_complexity(binary_roi):
     return max_strokes
 
 def draw_label(img, text, x, y, color=(0, 255, 255)):
-    """繪製帶有黑底的清楚文字標籤"""
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.8
     thickness = 2
@@ -148,7 +156,6 @@ class LiveProcessor(VideoProcessorBase):
         binary_proc = v65_morphology(binary, self.erosion, self.dilation)
         
         cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
         boxes_data = []
         for c in cnts:
             if cv2.contourArea(c) < 100: continue
@@ -161,9 +168,9 @@ class LiveProcessor(VideoProcessorBase):
         count_id = 1
         for (x, y, w, h) in boxes_data:
             roi = binary_proc[y:y+h, x:x+w]
-            inp = preprocess_input(roi)
+            cnn_in, _ = preprocess_input(roi) # 鏡頭模式為了速度，暫時只用 CNN
             if self.model:
-                pred = self.model.predict(inp, verbose=0)[0]
+                pred = self.model.predict(cnn_in, verbose=0)[0]
                 conf = np.max(pred)
                 lbl = np.argmax(pred)
                 
@@ -176,13 +183,8 @@ class LiveProcessor(VideoProcessorBase):
 
 def run_camera_mode(erosion, dilation, min_conf):
     with st.expander("📖 鏡頭模式使用說明 (點擊展開)", expanded=True):
-        st.markdown("""
-        1. **啟動**：點擊下方 `START` 按鈕並允許攝影機權限。
-        2. **對準**：將數字置於鏡頭中央，盡量保持背景單純。
-        3. **辨識**：系統會自動框選並顯示 **編號 (#1, #2...)**。
-        """)
-
-    st.info("📷 將數字置於鏡頭中央，系統會自動辨識")
+        st.markdown("1. 點擊 `START`。 2. 對準數字。 3. 系統自動框選。")
+    st.info("📷 鏡頭模式 (為求流暢，此模式主要使用 CNN)")
     ctx = webrtc_streamer(
         key="v65-cam",
         mode=WebRtcMode.SENDRECV,
@@ -193,27 +195,19 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 手寫板模式 (Clean + Undo)
+# 3. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
-    # 使用說明 (預設折疊)
-    with st.expander("📖 手寫板模式使用說明 (點擊展開)", expanded=False):
-        st.markdown("""
-        1. **書寫**：在下方黑色區域直接寫數字。
-        2. **修正**：寫錯可按 **「↩️ 復原」** 回到上一步，或切換 **「🧽 橡皮擦」**。
-        3. **結果**：畫布顯示編號，右側表格顯示詳細結果。
-        """)
+    with st.expander("📖 手寫板模式使用說明", expanded=False):
+        st.markdown("直接書寫，可使用復原或橡皮擦。")
 
-    # 初始化 Session State 以支援復原功能
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
     if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
 
-    c1, c2 = st.columns([3, 1.5]) # 調整版面比例
+    c1, c2 = st.columns([3, 1.5])
     
     with c1:
         st.markdown("### ✍️ 請在此書寫")
-        
-        # --- 工具列 ---
         c_tool, c_acts = st.columns([1.5, 2])
         with c_tool:
             tool_mode = st.radio("🖊️ 工具", ["✏️ 畫筆", "🧽 橡皮擦"], horizontal=True, label_visibility="collapsed")
@@ -221,104 +215,78 @@ def run_canvas_mode(erosion, dilation, min_conf):
         with c_acts:
             b_undo, b_clear = st.columns(2)
             with b_undo:
-                # [復原功能]
                 if st.button("↩️ 復原一筆", use_container_width=True):
                     if st.session_state['canvas_json'] is not None:
                         data = st.session_state['canvas_json']
                         if "objects" in data and len(data["objects"]) > 0:
-                            data["objects"].pop() # 移除最後一筆
+                            data["objects"].pop()
                             st.session_state['initial_drawing'] = data
-                            st.session_state['canvas_key'] = f"canvas_{time.time()}" # 強制重繪
+                            st.session_state['canvas_key'] = f"canvas_{time.time()}"
                             st.rerun()
-            
             with b_clear:
                 if st.button("🗑️ 清除全部", use_container_width=True):
                     st.session_state['canvas_key'] = f"canvas_{time.time()}"
                     st.session_state['initial_drawing'] = None
                     st.rerun()
 
-        # --- 畫布 ---
         canvas_res = st_canvas(
             fill_color="rgba(255, 165, 0, 0.3)",
             stroke_width=15 if tool_mode == "✏️ 畫筆" else 40,
             stroke_color="#FFFFFF" if tool_mode == "✏️ 畫筆" else "#000000",
             background_color="#000000",
-            height=400,
-            width=650,
-            drawing_mode="freedraw",
-            initial_drawing=st.session_state['initial_drawing'], # 載入復原後的狀態
+            height=400, width=650, drawing_mode="freedraw",
+            initial_drawing=st.session_state['initial_drawing'],
             key=st.session_state.get('canvas_key', 'canvas_0'),
             display_toolbar=True
         )
-        
-        # 隨時記錄當前狀態
-        if canvas_res.json_data is not None:
-            st.session_state['canvas_json'] = canvas_res.json_data
+        if canvas_res.json_data is not None: st.session_state['canvas_json'] = canvas_res.json_data
     
     with c2:
         st.markdown("### 📊 辨識清單")
-        
-        # 結果容器
         result_container = st.container(height=400, border=True)
         
         if canvas_res.image_data is not None and np.max(canvas_res.image_data) > 0:
             raw = canvas_res.image_data.astype(np.uint8)
             img_bgr = cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR) if raw.shape[2] == 4 else raw
             gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-            
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            # 隱藏 Debug 圖
             with st.expander("👁️ Debug (AI 視角)"):
                 st.image(processed, caption="二值化影像", use_container_width=True)
             
             cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
             boxes = sorted([cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 50], key=lambda b: b[0])
-            
             draw_img = img_bgr.copy()
             results_list = []
             
             for i, (x, y, w, h) in enumerate(boxes):
                 roi = processed[y:y+h, x:x+w]
-                inp = preprocess_input(roi)
-                pred = cnn_model.predict(inp, verbose=0)[0]
+                cnn_in, _ = preprocess_input(roi) # 手寫板環境單純，用 CNN 即可
+                
+                pred = cnn_model.predict(cnn_in, verbose=0)[0]
                 conf = np.max(pred)
                 lbl = np.argmax(pred)
                 
                 if conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
                     draw_label(draw_img, f"#{i+1}", x, y)
-                    # 收集資料
-                    results_list.append({
-                        "編號": f"#{i+1}",
-                        "預測數字": str(lbl),
-                        "信心度": f"{int(conf*100)}%"
-                    })
+                    results_list.append({"編號": f"#{i+1}", "預測數字": str(lbl), "信心度": f"{int(conf*100)}%"})
             
-            # 顯示表格
             with result_container:
-                if results_list:
-                    st.dataframe(results_list, hide_index=True, use_container_width=True)
-                else:
-                    st.info("尚未偵測到數字")
+                if results_list: st.dataframe(results_list, hide_index=True, use_container_width=True)
+                else: st.info("尚未偵測到數字")
         else:
-            with result_container:
-                st.info("請在左側書寫...")
+            with result_container: st.info("請在左側書寫...")
 
 # ==========================================
-# 4. 上傳模式
+# 4. 上傳模式 (整合 CNN + KNN 雙重驗證)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
-    with st.expander("📖 圖片上傳指南 (點擊展開)", expanded=True):
-        st.markdown("""
-        1. **上傳**：支援 JPG/PNG，點擊下方按鈕上傳。
-        2. **過濾**：系統已啟用 **3x3 網格掃描** 與 **孔洞偵測**，自動排除複雜國字與陰影。
-        3. **對照**：圖片上顯示 **編號**，詳細數字結果請看右側清單。
-        """)
+    with st.expander("📖 圖片上傳指南", expanded=True):
+        st.markdown("已啟用 **CNN + KNN 雙重驗證**，能大幅減少將國字誤判為數字的情況。")
 
-    st.info("支援 JPG/PNG，已啟用【3x3網格掃描】來排除複雜國字")
+    st.info("✅ 雙重驗證模式：如果 CNN 和 KNN 意見不合，系統會嚴格過濾")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -326,19 +294,16 @@ def run_upload_mode(erosion, dilation, min_conf):
         file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
         img_origin = cv2.imdecode(file_bytes, 1)
         h_orig, w_orig = img_origin.shape[:2]
-        
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
         thresh_adapt = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 35, 15)
         _, thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         binary_combined = cv2.bitwise_and(thresh_adapt, thresh_otsu)
-        
         processed = v65_morphology(binary_combined, erosion, dilation)
         
         cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         detected_count = 0
         display_img = img_origin.copy()
-        
         valid_boxes_data = []
         
         for c in cnts:
@@ -346,7 +311,7 @@ def run_upload_mode(erosion, dilation, min_conf):
             if area < 100: continue 
             x, y, w, h = cv2.boundingRect(c)
             
-            # 過濾邏輯
+            # 物理過濾
             if x < 10 or y < 10 or (x+w) > w_orig-10 or (y+h) > h_orig-10: continue
             if w * h > (h_orig * w_orig * 0.15): continue
             
@@ -361,33 +326,54 @@ def run_upload_mode(erosion, dilation, min_conf):
             max_strokes = check_multiline_complexity(roi_check)
             if max_strokes > 3: continue 
             
+            # ============================================
+            # 🧠 雙重模型預測 (CNN + KNN)
+            # ============================================
             roi = processed[y:y+h, x:x+w]
-            inp = preprocess_input(roi)
-            pred = cnn_model.predict(inp, verbose=0)[0]
+            cnn_in, knn_in = preprocess_input(roi)
             
-            conf = np.max(pred)
-            lbl = np.argmax(pred)
+            # 1. CNN 預測
+            pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
+            conf_cnn = np.max(pred_cnn)
+            lbl_cnn = np.argmax(pred_cnn)
+            
+            # 2. KNN 預測 (如果模型存在)
+            lbl_knn = -1
+            if knn_model:
+                lbl_knn = knn_model.predict(knn_in)[0]
+            
+            # 3. 雙重驗證邏輯
+            # 如果 CNN 和 KNN 答案不同，代表這個圖案很模糊或有爭議 -> 大幅扣分
+            final_conf = conf_cnn
+            is_disagree = False
+            
+            if knn_model and lbl_cnn != lbl_knn:
+                final_conf -= 0.30 # 意見不合，扣 30% 信心
+                is_disagree = True
+            
+            # 4. 其他幾何過濾 (同之前)
             holes = count_holes(roi)
+            if lbl_cnn != 1 and aspect_ratio < 0.35: continue
+            if lbl_cnn == 1 and aspect_ratio > 0.6: continue
+            if lbl_cnn in [8, 0, 6, 9] and holes == 0: continue
+            if lbl_cnn in [1, 2, 3, 5, 7] and holes > 0: continue
 
-            # 邏輯過濾
-            if lbl != 1 and aspect_ratio < 0.35: continue
-            if lbl == 1 and aspect_ratio > 0.6: continue
-            if lbl in [8, 0, 6, 9] and holes == 0: continue
-            if lbl in [1, 2, 3, 5, 7] and holes > 0: continue
-
-            final_conf_thresh = min_conf
-            if lbl in [4, 7]: final_conf_thresh += 0.20
+            target_thresh = min_conf
+            if lbl_cnn in [4, 7]: target_thresh += 0.20
             
-            if conf > final_conf_thresh:
+            # 5. 最終判定
+            if final_conf > target_thresh:
+                status_note = ""
+                if is_disagree: status_note = " (爭議)" # 雖然通過但有爭議
+                
                 valid_boxes_data.append({
                     'rect': (x, y, w, h),
-                    'lbl': lbl,
-                    'conf': conf
+                    'lbl': lbl_cnn,
+                    'conf': final_conf,
+                    'note': status_note
                 })
 
         valid_boxes_data.sort(key=lambda item: (item['rect'][1]//50, item['rect'][0]))
-
-        # 用於儲存文字結果
         results_list = []
 
         for idx, item in enumerate(valid_boxes_data):
@@ -397,49 +383,39 @@ def run_upload_mode(erosion, dilation, min_conf):
             
             cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
             draw_label(display_img, f"#{idx+1}", x, y)
-            
-            results_list.append(f"**#{idx+1}**: 數字 `{lbl}` ({int(conf*100)}%)")
+            results_list.append(f"**#{idx+1}**: 數字 `{lbl}` ({int(conf*100)}%){item['note']}")
             detected_count += 1
 
         img_rgb = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
-        
         c1, c2 = st.columns([3, 1])
         with c1:
             st.image(img_rgb, use_container_width=True, caption="辨識結果 (僅編號)")
         with c2:
             st.image(processed, use_container_width=True, caption="[Debug] AI 視角")
             st.markdown(f"**共找到 {detected_count} 個數字**")
-            
-            # 顯示結果清單
             if results_list:
                 st.markdown("---")
                 st.markdown("#### 📝 詳細清單")
-                for r in results_list:
-                    st.markdown(r)
+                for r in results_list: st.markdown(r)
 
 # ==========================================
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (Clean+Undo)")
+    st.sidebar.title("🔢 手寫辨識 (Dual Verify)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔪 V65 手術刀參數")
-    
-    with st.sidebar.expander("❓ 參數調整小教室"):
-        st.markdown("""
-        * **切割沾黏 (Erosion)**：數字黏在一起時調大。
-        * **筆畫加粗 (Dilation)**：筆畫斷掉時調大。
-        * **信心門檻**：雜訊太多時調高。
-        """)
+    with st.sidebar.expander("❓ 參數說明"):
+        st.markdown("調整 Erosion 切割沾黏字，Dilation 修補斷字。")
 
-    erosion_iter = st.sidebar.slider("切割沾黏 (Erosion)", 0, 5, 0, help="數字黏在一起時調大這個")
-    dilation_iter = st.sidebar.slider("筆畫加粗 (Dilation)", 0, 3, 2, help="筆畫太細時調大這個")
+    erosion_iter = st.sidebar.slider("切割沾黏 (Erosion)", 0, 5, 0)
+    dilation_iter = st.sidebar.slider("筆畫加粗 (Dilation)", 0, 3, 2)
     min_conf = st.sidebar.slider("信心門檻", 0.0, 1.0, 0.80) 
 
     if cnn_model is None:
-        st.error("❌ 找不到模型檔案 (cnn_model_robust.h5 或 mnist_cnn.h5)")
+        st.error("❌ 找不到模型檔案")
         st.stop()
 
     if mode == "📷 鏡頭 (Live)":
