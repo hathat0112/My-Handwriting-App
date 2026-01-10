@@ -13,7 +13,7 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (With IDs)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (ID Only)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -111,14 +111,12 @@ def check_multiline_complexity(binary_roi):
     return max_strokes
 
 def draw_label(img, text, x, y, color=(0, 255, 255)):
-    """[新功能] 繪製帶有黑底的清楚文字標籤"""
+    """繪製帶有黑底的清楚文字標籤"""
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.8
     thickness = 2
     (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
-    # 畫黑底背景，確保文字可讀
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
-    # 畫文字
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
 # ==========================================
@@ -151,7 +149,6 @@ class LiveProcessor(VideoProcessorBase):
         
         cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # 排序：從左到右，從上到下
         boxes_data = []
         for c in cnts:
             if cv2.contourArea(c) < 100: continue
@@ -159,7 +156,6 @@ class LiveProcessor(VideoProcessorBase):
             if x<5 or y<5: continue
             boxes_data.append((x,y,w,h))
         
-        # 簡單排序 (先依 x 排序)
         boxes_data.sort(key=lambda b: b[0])
 
         count_id = 1
@@ -173,8 +169,8 @@ class LiveProcessor(VideoProcessorBase):
                 
                 if conf > self.min_conf:
                     cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    # [修改] 顯示編號 #1, #2...
-                    draw_label(img, f"#{count_id}: {lbl}", x, y)
+                    # [修改] 只顯示編號
+                    draw_label(img, f"#{count_id}", x, y)
                     count_id += 1
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
@@ -221,10 +217,8 @@ def run_canvas_mode(erosion, dilation, min_conf):
             
             cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            # 排序：從左到右
             boxes = sorted([cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 50], key=lambda b: b[0])
             
-            # 準備繪圖的畫布 (用原始圖比較漂亮)
             draw_img = img_bgr.copy()
             
             results_txt = []
@@ -236,16 +230,15 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 lbl = np.argmax(pred)
                 
                 if conf > min_conf:
-                    # 畫框框
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
                     
-                    # [修改] 畫上清楚的標籤 "#編號: 數字"
-                    draw_label(draw_img, f"#{i+1}: {lbl}", x, y)
+                    # [修改] 圖片上只顯示 "#編號"，不顯示預測結果
+                    draw_label(draw_img, f"#{i+1}", x, y)
                     
+                    # 預測結果顯示在右側清單中
                     results_txt.append(f"**#{i+1}**: 數字 `{lbl}` ({int(conf*100)}%)")
             
-            # 顯示畫好框線的圖
-            st.image(draw_img, channels="BGR", use_container_width=True, caption="辨識結果 (含編號)")
+            st.image(draw_img, channels="BGR", use_container_width=True, caption="辨識結果 (僅編號)")
             
             if results_txt:
                 for r in results_txt: st.markdown(r)
@@ -277,7 +270,6 @@ def run_upload_mode(erosion, dilation, min_conf):
         detected_count = 0
         display_img = img_origin.copy()
         
-        # 先收集所有合法的框，再排序賦予編號
         valid_boxes_data = []
         
         for c in cnts:
@@ -324,25 +316,23 @@ def run_upload_mode(erosion, dilation, min_conf):
                     'conf': conf
                 })
 
-        # 排序：由左至右，由上至下 (近似閱讀順序)
         valid_boxes_data.sort(key=lambda item: (item['rect'][1]//50, item['rect'][0]))
 
-        # 繪製
         for idx, item in enumerate(valid_boxes_data):
             x, y, w, h = item['rect']
             lbl = item['lbl']
             
             cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
             
-            # [修改] 繪製 "#編號: 數字"
-            draw_label(display_img, f"#{idx+1}: {lbl}", x, y)
+            # [修改] 只顯示編號
+            draw_label(display_img, f"#{idx+1}", x, y)
             detected_count += 1
 
         img_rgb = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
         
         c1, c2 = st.columns([3, 1])
         with c1:
-            st.image(img_rgb, use_container_width=True, caption="辨識結果 (含編號)")
+            st.image(img_rgb, use_container_width=True, caption="辨識結果 (僅編號)")
         with c2:
             st.image(processed, use_container_width=True, caption="[Debug] AI 視角")
             st.markdown(f"**共找到 {detected_count} 個數字**")
@@ -351,7 +341,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (IDs)")
+    st.sidebar.title("🔢 手寫辨識 (IDs Only)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
