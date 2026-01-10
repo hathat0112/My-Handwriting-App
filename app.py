@@ -13,11 +13,11 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Clean Debug)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Final Ultimate)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
-# 1. 共用核心 (Shared Core)
+# 1. 共用核心
 # ==========================================
 @st.cache_resource
 def load_models():
@@ -53,7 +53,7 @@ cnn_model, knn_model = load_models()
 
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
-    # 先做開運算 (Opening) 去除細小白點雜訊
+    # 開運算去除噪點
     kernel_noise = np.ones((2,2), np.uint8)
     res = cv2.morphologyEx(res, cv2.MORPH_OPEN, kernel_noise)
 
@@ -61,7 +61,6 @@ def v65_morphology(binary_img, erosion, dilation):
         kernel = np.ones((3,3), np.uint8)
         res = cv2.erode(res, kernel, iterations=erosion)
     
-    # 閉運算補洞
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=1)
     
@@ -97,28 +96,34 @@ def count_holes(binary_roi):
                 holes += 1
     return holes
 
-def check_complexity(binary_roi):
+def check_multiline_complexity(binary_roi):
     """
-    計算筆畫複雜度 (Transitions)。
-    中文字通常橫豎筆畫多，穿越次數高；數字通常穿越次數低。
-    回傳：(水平穿越次數, 垂直穿越次數) 的最大值
+    [升級版] 多重掃描線複雜度檢查
+    分別在 25%, 50%, 75% 的位置進行橫切與直切。
+    只要有任何一條線穿過太多筆畫 (>3)，就視為複雜文字。
     """
     h, w = binary_roi.shape
-    # 取中間 1/3 區域進行掃描
-    center_y, center_x = h // 2, w // 2
+    max_strokes = 0
     
-    # 水平掃描線 (檢查有幾條豎畫)
-    row = binary_roi[center_y, :] / 255
-    trans_h = np.sum(np.abs(np.diff(row))) / 2 # 除以2是因為一進一出算一次穿越
-    
-    # 垂直掃描線 (檢查有幾條橫畫)
-    col = binary_roi[:, center_x] / 255
-    trans_v = np.sum(np.abs(np.diff(col))) / 2
-    
-    return max(trans_h, trans_v)
+    # 掃描 3 條水平線
+    for r_ratio in [0.25, 0.5, 0.75]:
+        row = binary_roi[int(h * r_ratio), :] / 255
+        # 計算穿越次數 (0->1 或 1->0)
+        transitions = np.sum(np.abs(np.diff(row)))
+        strokes = (transitions + 1) // 2
+        max_strokes = max(max_strokes, strokes)
+
+    # 掃描 3 條垂直線
+    for c_ratio in [0.25, 0.5, 0.75]:
+        col = binary_roi[:, int(w * c_ratio)] / 255
+        transitions = np.sum(np.abs(np.diff(col)))
+        strokes = (transitions + 1) // 2
+        max_strokes = max(max_strokes, strokes)
+        
+    return max_strokes
 
 # ==========================================
-# 2. 模式 A: 鏡頭模式
+# 2. 鏡頭模式
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -177,7 +182,7 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 模式 B: 手寫板模式
+# 3. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     c1, c2 = st.columns([2, 1])
@@ -225,10 +230,10 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 st.warning("寫得太潦草或信心過低")
 
 # ==========================================
-# 4. 模式 C: 上傳圖片 - 終極降噪版
+# 4. 上傳模式 - 終極掃描版
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
-    st.info("支援 JPG/PNG，已啟用【複雜度過濾】來消除中文字干擾")
+    st.info("支援 JPG/PNG，已啟用【3x3網格掃描】來排除複雜國字")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -237,23 +242,18 @@ def run_upload_mode(erosion, dilation, min_conf):
         img_origin = cv2.imdecode(file_bytes, 1)
         h_orig, w_orig = img_origin.shape[:2]
         
-        # 1. 影像增強 (CLAHE) - 讓字更黑，背景更亮
+        # 1. 影像增強
         lab = cv2.cvtColor(img_origin, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        cl = clahe.apply(l)
-        enhanced = cv2.cvtColor(cv2.merge((cl,a,b)), cv2.COLOR_LAB2BGR)
+        enhanced = cv2.cvtColor(cv2.merge((clahe.apply(l),a,b)), cv2.COLOR_LAB2BGR)
         gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
         
-        # 2. 嚴格二值化 (Stricter Thresholding)
-        # BlockSize 調大 (25->35)，C 調大 (10->15) 以過濾背景紋理
+        # 2. 嚴格二值化
         thresh_adapt = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 35, 15)
         _, thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        # 取交集：只有「非常確定是黑」的地方才保留
         binary_combined = cv2.bitwise_and(thresh_adapt, thresh_otsu)
         
-        # V65 形態學 + 額外降噪
         processed = v65_morphology(binary_combined, erosion, dilation)
         
         cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -262,36 +262,30 @@ def run_upload_mode(erosion, dilation, min_conf):
         
         for c in cnts:
             area = cv2.contourArea(c)
-            # 濾除太小的雜點 (調高標準)
             if area < 100: continue 
             x, y, w, h = cv2.boundingRect(c)
             
-            # ==========================================
-            # 🛑 物理過濾層 (Physical Layer)
-            # ==========================================
-            if x < 10 or y < 10 or (x+w) > w_orig-10 or (y+h) > h_orig-10: continue # 邊緣
-            if w * h > (h_orig * w_orig * 0.15): continue # 巨大物件
+            # 物理過濾
+            if x < 10 or y < 10 or (x+w) > w_orig-10 or (y+h) > h_orig-10: continue
+            if w * h > (h_orig * w_orig * 0.15): continue
             
             roi_check = processed[y:y+h, x:x+w]
             density = cv2.countNonZero(roi_check) / (w * h)
-            if density < 0.15 or density > 0.65: continue # 密度異常
+            if density < 0.15 or density > 0.55: continue # 稍微調低密度上限，國字通常很密
             
-            # 長寬比檢查
             aspect_ratio = w / float(h)
-            if aspect_ratio > 1.2: continue # 太寬一定是中文字
-            if aspect_ratio < 0.15: continue # 太細是雜訊
+            if aspect_ratio > 1.2: continue 
+            if aspect_ratio < 0.15: continue
             
             # ==========================================
-            # 🛑 複雜度過濾層 (Complexity Layer) [新功能]
+            # 🛑 核心升級：3x3 網格複雜度檢測
             # ==========================================
-            # 計算穿越次數：數字通常結構簡單，穿越次數少
-            # 數字 8 最多穿越 3 次；中文字「法」可能穿越 5-6 次
-            complexity = check_complexity(roi_check)
-            if complexity > 3.5: continue # 太複雜，視為中文字
+            # 數字筆畫簡單，任何一條切線通常最多遇到 3 段筆畫 (例如 8 的垂直切線)
+            # 如果超過 3 段，肯定是複雜的國字 (例如 "必", "公", "法")
+            max_strokes = check_multiline_complexity(roi_check)
+            if max_strokes > 3: continue 
             
-            # ==========================================
-            # 🧠 模型預測
-            # ==========================================
+            # 模型預測
             roi = processed[y:y+h, x:x+w]
             inp = preprocess_input(roi)
             pred = cnn_model.predict(inp, verbose=0)[0]
@@ -300,24 +294,15 @@ def run_upload_mode(erosion, dilation, min_conf):
             lbl = np.argmax(pred)
             holes = count_holes(roi)
 
-            # ==========================================
-            # 🛑 邏輯過濾層 (Logic Layer)
-            # ==========================================
-            # 規則 1: 瘦子條款 (針對誤判為 3, 2, 5, 7 的豎畫)
+            # 邏輯過濾
             if lbl != 1 and aspect_ratio < 0.35: continue
-            
-            # 規則 2: 數字 1 若太胖，視為中文字部件
             if lbl == 1 and aspect_ratio > 0.6: continue
-
-            # 規則 3: 數字 8, 0, 6, 9 必須有洞
             if lbl in [8, 0, 6, 9] and holes == 0: continue
-            
-            # 規則 4: 數字 1, 2, 3, 5, 7 不應該有洞
             if lbl in [1, 2, 3, 5, 7] and holes > 0: continue
 
-            # 規則 5: 針對易誤判數字提高信心門檻
+            # 針對容易混淆的 7 和 4 提高門檻
             final_conf_thresh = min_conf
-            if lbl in [3, 4, 7]: final_conf_thresh += 0.20
+            if lbl in [4, 7]: final_conf_thresh += 0.20
             
             if conf > final_conf_thresh:
                 cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
@@ -333,21 +318,22 @@ def run_upload_mode(erosion, dilation, min_conf):
         with c1:
             st.image(img_rgb, use_container_width=True, caption="辨識結果")
         with c2:
-            st.image(processed, use_container_width=True, caption="[Debug] AI 視角 (已降噪)")
+            st.image(processed, use_container_width=True, caption="[Debug] AI 視角")
             st.markdown(f"**共找到 {detected_count} 個數字**")
 
 # ==========================================
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 Clean")
+    st.sidebar.title("🔢 手寫辨識 Ultimate")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔪 V65 手術刀參數")
     erosion_iter = st.sidebar.slider("切割沾黏 (Erosion)", 0, 5, 0, help="數字黏在一起時調大這個")
     dilation_iter = st.sidebar.slider("筆畫加粗 (Dilation)", 0, 3, 2, help="筆畫太細時調大這個")
-    min_conf = st.sidebar.slider("信心門檻", 0.0, 1.0, 0.5)
+    # [V65] 預設信心提高到 0.80，強迫 AI 要很有把握才顯示
+    min_conf = st.sidebar.slider("信心門檻", 0.0, 1.0, 0.80) 
 
     if cnn_model is None:
         st.error("❌ 找不到模型檔案 (cnn_model_robust.h5 或 mnist_cnn.h5)")
