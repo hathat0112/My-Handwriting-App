@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V78 Pencil Saver)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V79 Shadow Hunter)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -77,7 +77,6 @@ cnn_model, knn_model, svm_model = load_models()
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
     
-    # 一般模式的形態學處理
     if erosion > 0:
         kernel = np.ones((3,3), np.uint8)
         res = cv2.erode(res, kernel, iterations=erosion)
@@ -320,16 +319,16 @@ def run_canvas_mode(erosion, dilation, min_conf):
             with result_container: st.info("請在左側書寫...")
 
 # ==========================================
-# 4. 上傳模式 (V78 Pencil Saver)
+# 4. 上傳模式 (V79 BlackHat Shadow Hunter)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     with st.expander("📖 上傳模式使用指南", expanded=True):
         st.markdown("""
         **1. 上傳**：選擇圖片。 **2. 檢視**：系統會自動過濾雜訊並辨識。
-        * **新功能**：專門優化鉛筆字辨識，避免筆畫被過濾。
+        * **黑帽運算**：使用專業演算法分離陰影與筆跡，Debug 圖將不再有滿天星斗。
         """)
 
-    st.info("✅ 已啟用【V78 鉛筆救星引擎】，確保細線條不丟失")
+    st.info("✅ 已啟用【V79 黑帽獵影引擎】，無視背景紋路與陰影")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -337,7 +336,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
         img_origin = cv2.imdecode(file_bytes, 1)
         
-        # 1. 圖片瘦身
+        # 1. 圖片瘦身 (加速)
         h, w = img_origin.shape[:2]
         if w > 1000:
             scale = 1000 / w
@@ -345,26 +344,26 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # 2. 磨皮
-        blur = cv2.GaussianBlur(gray, (9, 9), 0)
-        # 3. 提亮
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        enhanced_gray = clahe.apply(blur)
+        # 2. [核心變革] 黑帽運算 (BlackHat)
+        # 用一個比筆畫稍大的 kernel (15x15) 去掃描
+        # 它可以把 "比周圍暗的東西" (筆畫) 抓出來，並把 "平滑的背景" (紙張/陰影) 扣除
+        # 這是去除光影不均與紋路的最終兵器
+        kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         
-        # 4. 自適應閥值 (靈敏度適中)
-        binary = cv2.adaptiveThreshold(enhanced_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 10)
+        # 3. 對比拉伸 (Normalize)
+        # 因為黑帽運算後的筆跡可能很淡，我們把它拉到 0~255 最亮
+        blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
         
-        # [核心修正] 鉛筆字專用形態學
-        # 絕對不做腐蝕 (Erosion)，因為鉛筆字太細了
-        # 相反，我們先做膨脹 (Dilation) 把字變粗，確保它被看見
+        # 4. Otsu 二值化 (現在背景是純黑的，Otsu 會非常準)
+        _, binary = cv2.threshold(blackhat_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
-        kernel_pencil = np.ones((3,3), np.uint8)
-        # 先加粗！
-        thick_binary = cv2.dilate(binary, kernel_pencil, iterations=1)
-        # 再接斷線
-        processed = cv2.morphologyEx(thick_binary, cv2.MORPH_CLOSE, kernel_pencil, iterations=1)
+        # 5. 形態學處理 (稍微連接斷字)
+        # 這裡不需要腐蝕，因為黑帽已經幫我們把雜訊殺光了
+        kernel_link = np.ones((3,3), np.uint8)
+        processed = cv2.dilate(binary, kernel_link, iterations=1)
         
-        # 使用者設定的 Dilation 還可以疊加
+        # 使用者想加粗可以再加
         if dilation > 0:
             processed = cv2.dilate(processed, None, iterations=dilation)
         
@@ -375,12 +374,11 @@ def run_upload_mode(erosion, dilation, min_conf):
         
         for c in cnts:
             area = cv2.contourArea(c)
-            # 面積過濾：因為字被加粗了，雜訊也會變大，所以門檻要適度
             if area < 150: continue 
             
             x, y, w, h = cv2.boundingRect(c)
             
-            # 尺寸過濾
+            # 尺寸雙重鎖定
             if w < 20 and h < 20: continue
             if w * h > (h * w * 0.9): continue
             
@@ -415,7 +413,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         with c1:
             st.image(img_rgb, use_container_width=True, caption="辨識結果 (僅編號)")
         with c2:
-            st.image(processed, use_container_width=True, caption="[Debug] AI 視角 (已加粗)")
+            st.image(processed, use_container_width=True, caption="[Debug] AI 視角 (黑帽運算)")
             st.markdown(f"**共找到 {detected_count} 個數字**")
             if results_list:
                 st.markdown("---")
@@ -426,7 +424,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (V78 Pencil Saver)")
+    st.sidebar.title("🔢 手寫辨識 (V79 Shadow Hunter)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
