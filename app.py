@@ -14,7 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (V71 Max 99%)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (V72 Low-Light)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -76,15 +76,15 @@ cnn_model, knn_model, svm_model = load_models()
 
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
-    kernel_noise = np.ones((2,2), np.uint8)
-    res = cv2.morphologyEx(res, cv2.MORPH_OPEN, kernel_noise)
-
+    
+    # 針對鉛筆字，減少雜訊過濾的力道，以免把字擦掉
     if erosion > 0:
         kernel = np.ones((3,3), np.uint8)
         res = cv2.erode(res, kernel, iterations=erosion)
     
+    # 閉運算：把斷掉的筆畫接起來
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=1)
+    res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=2)
     
     if dilation > 0:
         res = cv2.dilate(res, None, iterations=dilation)
@@ -120,7 +120,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# 投票機制 (修正版：上限 99%)
+# 投票機制
 def ensemble_predict(roi, min_conf):
     cnn_in, flat_in = preprocess_input(roi)
     
@@ -149,7 +149,6 @@ def ensemble_predict(roi, min_conf):
     details = ""
     
     if vote_count == len(votes):
-        # [修改] 全票通過獎勵，但天花板設為 0.99 (99%)
         final_conf = min(0.99, final_conf + 0.1)
     elif vote_count >= 2:
         if lbl_cnn != final_lbl:
@@ -179,6 +178,8 @@ class LiveProcessor(VideoProcessorBase):
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # 鏡頭模式通常光線較好，維持基本處理
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
         binary_proc = v65_morphology(binary, self.erosion, self.dilation)
@@ -200,7 +201,6 @@ class LiveProcessor(VideoProcessorBase):
             if self.model:
                 pred = self.model.predict(cnn_in, verbose=0)[0]
                 conf = np.max(pred)
-                # 鏡頭模式也遵守 99% 上限
                 if conf > 0.99: conf = 0.99
                 
                 if conf > self.min_conf:
@@ -285,7 +285,6 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            # 融合力道 4x4 (平衡點)
             merge_kernel = np.ones((4, 4), np.uint8) 
             merged_mask = cv2.dilate(processed, merge_kernel, iterations=2)
             cnts, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -323,16 +322,16 @@ def run_canvas_mode(erosion, dilation, min_conf):
             with result_container: st.info("請在左側書寫...")
 
 # ==========================================
-# 4. 上傳模式
+# 4. 上傳模式 (專為暗光與鉛筆優化)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     with st.expander("📖 上傳模式使用指南", expanded=True):
         st.markdown("""
         **1. 上傳**：選擇圖片。 **2. 檢視**：系統會自動過濾雜訊並辨識。
-        * **三重驗證**：已啟用 CNN+KNN+SVM 投票機制。
+        * **新功能**：已增強「暗光」與「鉛筆字」的辨識能力，解決陰影問題。
         """)
 
-    st.info("✅ 已啟用【CNN + KNN + SVM】黃金三角驗證，準確度大幅提升")
+    st.info("✅ 已啟用【V72 暗光增強引擎】，可辨識陰影下的鉛筆字")
     
     file = st.file_uploader("選擇圖片", type=["jpg", "png", "jpeg"])
     
@@ -342,10 +341,16 @@ def run_upload_mode(erosion, dilation, min_conf):
         h_orig, w_orig = img_origin.shape[:2]
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        thresh_adapt = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 35, 15)
-        _, thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        binary_combined = cv2.bitwise_and(thresh_adapt, thresh_otsu)
-        processed = v65_morphology(binary_combined, erosion, dilation)
+        # [核心升級 1] CLAHE 對比度增強 (把暗處細節提亮)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        enhanced_gray = clahe.apply(gray)
+        
+        # [核心升級 2] 使用單純的 Adaptive Threshold (放棄 Otsu，因為它會被陰影誤導)
+        # blockSize=45 (大範圍參考), C=5 (高靈敏度，抓出淺色筆跡)
+        binary = cv2.adaptiveThreshold(enhanced_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 45, 5)
+        
+        # 形態學處理 (使用側邊欄參數)
+        processed = v65_morphology(binary, erosion, dilation)
         
         cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         detected_count = 0
@@ -353,9 +358,10 @@ def run_upload_mode(erosion, dilation, min_conf):
         valid_boxes_data = []
         
         for c in cnts:
-            if cv2.contourArea(c) < 200: continue 
+            if cv2.contourArea(c) < 150: continue 
             x, y, w, h = cv2.boundingRect(c)
-            if x < 10 or y < 10 or (x+w) > w_orig-10 or (y+h) > h_orig-10: continue
+            # 排除太誇張的長條
+            if w * h > (h_orig * w_orig * 0.9): continue
             
             roi = processed[y:y+h, x:x+w]
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
@@ -388,7 +394,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         with c1:
             st.image(img_rgb, use_container_width=True, caption="辨識結果 (僅編號)")
         with c2:
-            st.image(processed, use_container_width=True, caption="[Debug] AI 視角")
+            st.image(processed, use_container_width=True, caption="[Debug] AI 視角 (已增強對比)")
             st.markdown(f"**共找到 {detected_count} 個數字**")
             if results_list:
                 st.markdown("---")
@@ -399,7 +405,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (V71 Max 99%)")
+    st.sidebar.title("🔢 手寫辨識 (V72 Low-Light)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
