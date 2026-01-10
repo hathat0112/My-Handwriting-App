@@ -13,7 +13,7 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Instruction Ver.)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Clean+Undo)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
@@ -175,7 +175,6 @@ class LiveProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 def run_camera_mode(erosion, dilation, min_conf):
-    # [新增] 使用說明
     with st.expander("📖 鏡頭模式使用說明 (點擊展開)", expanded=True):
         st.markdown("""
         1. **啟動**：點擊下方 `START` 按鈕並允許攝影機權限。
@@ -194,32 +193,74 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 手寫板模式
+# 3. 手寫板模式 (Clean + Undo)
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
-    # [新增] 使用說明
-    with st.expander("📖 手寫板模式使用說明 (點擊展開)", expanded=True):
+    # 使用說明 (預設折疊)
+    with st.expander("📖 手寫板模式使用說明 (點擊展開)", expanded=False):
         st.markdown("""
         1. **書寫**：在下方黑色區域直接寫數字。
-        2. **工具**：左側可切換筆刷或橡皮擦，下方按鈕可清除畫布。
-        3. **結果**：畫布上會顯示 **編號**，右側清單顯示 **辨識數字**。
+        2. **修正**：寫錯可按 **「↩️ 復原」** 回到上一步，或切換 **「🧽 橡皮擦」**。
+        3. **結果**：畫布顯示編號，右側表格顯示詳細結果。
         """)
 
-    c1, c2 = st.columns([2, 1])
+    # 初始化 Session State 以支援復原功能
+    if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
+    if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
+
+    c1, c2 = st.columns([3, 1.5]) # 調整版面比例
+    
     with c1:
+        st.markdown("### ✍️ 請在此書寫")
+        
+        # --- 工具列 ---
+        c_tool, c_acts = st.columns([1.5, 2])
+        with c_tool:
+            tool_mode = st.radio("🖊️ 工具", ["✏️ 畫筆", "🧽 橡皮擦"], horizontal=True, label_visibility="collapsed")
+        
+        with c_acts:
+            b_undo, b_clear = st.columns(2)
+            with b_undo:
+                # [復原功能]
+                if st.button("↩️ 復原一筆", use_container_width=True):
+                    if st.session_state['canvas_json'] is not None:
+                        data = st.session_state['canvas_json']
+                        if "objects" in data and len(data["objects"]) > 0:
+                            data["objects"].pop() # 移除最後一筆
+                            st.session_state['initial_drawing'] = data
+                            st.session_state['canvas_key'] = f"canvas_{time.time()}" # 強制重繪
+                            st.rerun()
+            
+            with b_clear:
+                if st.button("🗑️ 清除全部", use_container_width=True):
+                    st.session_state['canvas_key'] = f"canvas_{time.time()}"
+                    st.session_state['initial_drawing'] = None
+                    st.rerun()
+
+        # --- 畫布 ---
         canvas_res = st_canvas(
             fill_color="rgba(255, 165, 0, 0.3)",
-            stroke_width=20,
-            stroke_color="#FFF",
-            background_color="#000",
-            height=350,
-            width=600,
+            stroke_width=15 if tool_mode == "✏️ 畫筆" else 40,
+            stroke_color="#FFFFFF" if tool_mode == "✏️ 畫筆" else "#000000",
+            background_color="#000000",
+            height=400,
+            width=650,
             drawing_mode="freedraw",
-            key="canvas_v65"
+            initial_drawing=st.session_state['initial_drawing'], # 載入復原後的狀態
+            key=st.session_state.get('canvas_key', 'canvas_0'),
+            display_toolbar=True
         )
+        
+        # 隨時記錄當前狀態
+        if canvas_res.json_data is not None:
+            st.session_state['canvas_json'] = canvas_res.json_data
     
     with c2:
-        st.markdown("### 辨識結果")
+        st.markdown("### 📊 辨識清單")
+        
+        # 結果容器
+        result_container = st.container(height=400, border=True)
+        
         if canvas_res.image_data is not None and np.max(canvas_res.image_data) > 0:
             raw = canvas_res.image_data.astype(np.uint8)
             img_bgr = cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR) if raw.shape[2] == 4 else raw
@@ -228,15 +269,17 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            st.image(processed, caption="[Debug] AI 視角", width=200)
+            # 隱藏 Debug 圖
+            with st.expander("👁️ Debug (AI 視角)"):
+                st.image(processed, caption="二值化影像", use_container_width=True)
             
             cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             boxes = sorted([cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 50], key=lambda b: b[0])
             
             draw_img = img_bgr.copy()
+            results_list = []
             
-            results_txt = []
             for i, (x, y, w, h) in enumerate(boxes):
                 roi = processed[y:y+h, x:x+w]
                 inp = preprocess_input(roi)
@@ -247,20 +290,27 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 if conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
                     draw_label(draw_img, f"#{i+1}", x, y)
-                    results_txt.append(f"**#{i+1}**: 數字 `{lbl}` ({int(conf*100)}%)")
+                    # 收集資料
+                    results_list.append({
+                        "編號": f"#{i+1}",
+                        "預測數字": str(lbl),
+                        "信心度": f"{int(conf*100)}%"
+                    })
             
-            st.image(draw_img, channels="BGR", use_container_width=True, caption="辨識結果 (僅編號)")
-            
-            if results_txt:
-                for r in results_txt: st.markdown(r)
-            else:
-                st.warning("寫得太潦草或信心過低")
+            # 顯示表格
+            with result_container:
+                if results_list:
+                    st.dataframe(results_list, hide_index=True, use_container_width=True)
+                else:
+                    st.info("尚未偵測到數字")
+        else:
+            with result_container:
+                st.info("請在左側書寫...")
 
 # ==========================================
 # 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
-    # [新增] 使用說明
     with st.expander("📖 圖片上傳指南 (點擊展開)", expanded=True):
         st.markdown("""
         1. **上傳**：支援 JPG/PNG，點擊下方按鈕上傳。
@@ -371,13 +421,12 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (Instruction)")
+    st.sidebar.title("🔢 手寫辨識 (Clean+Undo)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔪 V65 手術刀參數")
     
-    # [新增] 參數說明
     with st.sidebar.expander("❓ 參數調整小教室"):
         st.markdown("""
         * **切割沾黏 (Erosion)**：數字黏在一起時調大。
