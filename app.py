@@ -14,11 +14,11 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # 設定頁面
-st.set_page_config(page_title="AI 手寫辨識 (Final Tuned)", page_icon="🔢", layout="wide")
+st.set_page_config(page_title="AI 手寫辨識 (Complete)", page_icon="🔢", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # ==========================================
-# 1. 共用核心
+# 1. 共用核心 (集成 CNN, KNN, SVM)
 # ==========================================
 @st.cache_resource
 def load_models():
@@ -188,6 +188,7 @@ class LiveProcessor(VideoProcessorBase):
             if self.model:
                 pred = self.model.predict(cnn_in, verbose=0)[0]
                 conf = np.max(pred)
+                lbl = np.argmax(pred)
                 
                 if conf > self.min_conf:
                     cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
@@ -197,12 +198,18 @@ class LiveProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 def run_camera_mode(erosion, dilation, min_conf):
-    with st.expander("📖 鏡頭模式使用說明 (點擊展開)", expanded=True):
+    # [恢復] 詳細說明
+    with st.expander("📖 鏡頭模式使用指南 & 注意事項 (點擊展開)", expanded=True):
         st.markdown("""
         ### 🎯 使用步驟
         1. **啟動**：點擊下方 `START` 按鈕，允許瀏覽器使用攝影機。
         2. **對準**：將數字置於畫面中央，保持光線充足。
         3. **辨識**：系統會自動框選並顯示編號。
+        
+        ### ⚠️ 注意事項與技巧
+        * **💡 光線是關鍵**：請確保環境光線充足，避免陰影遮擋。
+        * **💡 背景要乾淨**：最理想的情況是 **「白紙黑字」**。
+        * **💡 距離要適中**：數字太小或太遠會影響辨識效果。
         """)
     st.info("📷 鏡頭模式")
     ctx = webrtc_streamer(
@@ -215,15 +222,24 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 手寫板模式 (V65 Tuned)
+# 3. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
-    with st.expander("📖 手寫板模式使用說明 (點擊展開)", expanded=False):
+    # [恢復] 詳細說明
+    with st.expander("📖 手寫板模式使用指南 & 注意事項 (點擊展開)", expanded=False):
         st.markdown("""
         ### 🎯 使用步驟
         1. **書寫**：在下方的黑色畫布區，用滑鼠或觸控筆直接寫下 0-9 的數字。
-        2. **工具**：畫筆、橡皮擦、復原、清除。
-        3. **對照**：右側會顯示編號對照圖與詳細清單。
+        2. **工具**：
+           * **✏️ 畫筆**：預設工具，用來寫字。
+           * **🧽 橡皮擦**：擦掉寫錯的部分。
+           * **↩️ 復原一筆**：寫壞了？按一下回溯，不用全部重寫。
+           * **🗑️ 清除全部**：一鍵清空畫布，重新開始。
+        3. **對照**：右側會顯示「編號對照圖」與詳細清單。
+        
+        ### 💡 聰明功能
+        * **筆畫融合**：如果你寫 `3` 或 `5` 筆畫斷掉，系統會自動把它們接起來看。
+        * **抗噪點**：太小的誤觸白點會自動被忽略。
         """)
 
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
@@ -277,7 +293,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            # [修正] 降低融合力道：從 15x15 降為 10x10，避免黏到不該黏的
+            # [核心] 筆畫融合 (力道 10x10，適中)
             merge_kernel = np.ones((10, 10), np.uint8) 
             merged_mask = cv2.dilate(processed, merge_kernel, iterations=2)
             
@@ -288,9 +304,9 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 area = cv2.contourArea(c)
                 x, y, w, h = cv2.boundingRect(c)
                 
-                # [修正] 放寬過濾標準：讓小一點的字 (0, 9, 4) 也能通過
-                if area < 300: continue # 原本是 800，改成 300
-                if h < 20 or w < 5: continue # 允許更瘦更矮的字
+                # [核心] 幾何過濾 (參數已調教：允許小字，殺掉雜訊)
+                if area < 300: continue
+                if h < 20 or w < 5: continue 
                 
                 valid_boxes.append((x,y,w,h))
             
@@ -322,6 +338,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
 # 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
+    # [恢復] 詳細說明
     with st.expander("📖 上傳模式使用指南 & 疑難排解 (點擊展開)", expanded=True):
         st.markdown("""
         ### 🎯 使用步驟
@@ -332,6 +349,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         ### ⚠️ 過濾機制
         * **三重驗證**：CNN + KNN + SVM 同時投票。
         * **結構過濾**：排除複雜國字與陰影。
+        * **形狀過濾**：太細長或太寬扁的線條會被忽略。
         """)
 
     st.info("✅ 已啟用【CNN + KNN + SVM】黃金三角驗證，準確度大幅提升")
@@ -355,7 +373,6 @@ def run_upload_mode(erosion, dilation, min_conf):
         valid_boxes_data = []
         
         for c in cnts:
-            # [修正] 上傳模式也同步放寬
             if cv2.contourArea(c) < 200: continue 
             x, y, w, h = cv2.boundingRect(c)
             
@@ -453,12 +470,13 @@ def run_upload_mode(erosion, dilation, min_conf):
 # 5. 主程式分流
 # ==========================================
 def main():
-    st.sidebar.title("🔢 手寫辨識 (Final Tuned)")
+    st.sidebar.title("🔢 手寫辨識 (Complete)")
     mode = st.sidebar.radio("選擇模式", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳圖片 (Upload)"])
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔪 V65 手術刀參數")
     
+    # [恢復] 詳細參數說明
     with st.sidebar.expander("❓ 參數調整指南"):
         st.markdown("""
         **1. 切割沾黏 (Erosion)**
