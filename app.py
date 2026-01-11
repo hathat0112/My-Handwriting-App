@@ -4,10 +4,10 @@ import streamlit as st
 # 0. 頁面設定 (必須是第一行)
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V96)", 
+    page_title="Handwriting AI (V97)", 
     page_icon="✒️", 
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed" # 首頁時先收起側邊欄，比較乾淨
 )
 
 import cv2
@@ -62,14 +62,14 @@ st.markdown("""
         transform: scale(1.02);
     }
 
-    /* 4. [關鍵修正] 移除畫布的所有邊框與陰影 */
+    /* 4. 移除畫布的所有邊框與陰影 */
     iframe[title="streamlit_drawable_canvas.st_canvas"] {
         border: none !important;
         box-shadow: none !important;
         background-color: transparent !important;
     }
     
-    /* 5. 確保畫布外層容器也是透明的，消除"白底" */
+    /* 5. 確保畫布外層容器也是透明的 */
     div[data-testid="stVerticalBlock"] > div {
         background-color: transparent;
     }
@@ -80,6 +80,25 @@ st.markdown("""
     /* 7. 調整頂部間距 */
     .block-container {
         padding-top: 2rem;
+    }
+    
+    /* 8. 歡迎頁面專用樣式 */
+    .welcome-container {
+        text-align: center;
+        padding: 50px;
+        border-radius: 15px;
+        background: rgba(255, 255, 255, 0.05);
+        margin-top: 50px;
+    }
+    .welcome-title {
+        font-size: 3rem;
+        font-weight: 700;
+        margin-bottom: 1rem;
+    }
+    .welcome-desc {
+        font-size: 1.2rem;
+        color: #888;
+        margin-bottom: 2rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -548,39 +567,74 @@ def run_upload_mode(erosion, dilation, min_conf):
                 st.image(processed, use_container_width=True, caption="BlackHat Vision")
 
 # ==========================================
-# 5. 主程式分流
+# 5. 主程式分流 (含歡迎頁面邏輯)
 # ==========================================
 def main():
     try:
-        st.title("HANDWRITING AI")
-        st.sidebar.header("Settings")
-        mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
-        st.sidebar.divider()
-        
-        with st.sidebar.expander("🔧 Advanced Config", expanded=False):
-            st.markdown("""
-            <div class="guide-text">
-            <b>💡 調整指南</b><br>
-            • <b>Erosion (瘦身)</b>: 數字黏在一起時調大。<br>
-            • <b>Dilation (增肥)</b>: 筆畫太淡或斷掉時調大。<br>
-            • <b>Confidence</b>: 雜訊太多時調高。
-            </div>
-            """, unsafe_allow_html=True)
+        # 狀態初始化：判斷是否已進入主程式
+        if 'page' not in st.session_state:
+            st.session_state['page'] = 'welcome'
+
+        # --- 歡迎首頁 ---
+        if st.session_state['page'] == 'welcome':
+            # 垂直置中佈局技巧
+            st.markdown("<br><br>", unsafe_allow_html=True)
             
-            erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0, help="把線條變細，用來分開黏在一起的字")
-            dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2, help="把線條變粗，用來連接斷掉的筆畫")
-            min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字")
+            c1, c2, c3 = st.columns([1, 2, 1])
+            with c2:
+                st.markdown("""
+                <div class="welcome-container">
+                    <div class="welcome-title">✒️ Handwriting AI</div>
+                    <div class="welcome-desc">
+                        智慧手寫數字辨識系統<br>
+                        支援即時鏡頭、手寫板、圖片上傳
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # 巨大的開始按鈕
+                if st.button("🚀 開始使用 / START", use_container_width=True, type="primary"):
+                    st.session_state['page'] = 'app'
+                    st.rerun() # 重新執行以載入主程式介面
 
-        if cnn_model is None:
-            st.error("Model not found! 請確保 mnist_cnn.h5 存在")
-            st.stop()
+        # --- 主程式介面 ---
+        elif st.session_state['page'] == 'app':
+            st.title("HANDWRITING AI")
+            
+            # 側邊欄 (進入主程式後才顯示)
+            st.sidebar.header("Settings")
+            mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
+            st.sidebar.divider()
+            
+            with st.sidebar.expander("🔧 Advanced Config", expanded=False):
+                st.markdown("""
+                <div class="guide-text">
+                <b>💡 調整指南</b><br>
+                • <b>Erosion (瘦身)</b>: 數字黏在一起時調大。<br>
+                • <b>Dilation (增肥)</b>: 筆畫太淡或斷掉時調大。<br>
+                • <b>Confidence</b>: 雜訊太多時調高。
+                </div>
+                """, unsafe_allow_html=True)
+                
+                erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0, help="把線條變細，用來分開黏在一起的字")
+                dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2, help="把線條變粗，用來連接斷掉的筆畫")
+                min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字")
+            
+            # 返回首頁按鈕
+            if st.sidebar.button("🏠 回到首頁"):
+                st.session_state['page'] = 'welcome'
+                st.rerun()
 
-        if mode == "📷 鏡頭 (Live)":
-            run_camera_mode(erosion_iter, dilation_iter, min_conf)
-        elif mode == "✍️ 手寫板 (Canvas)":
-            run_canvas_mode(erosion_iter, dilation_iter, min_conf)
-        elif mode == "📂 上傳 (Upload)":
-            run_upload_mode(erosion_iter, dilation_iter, min_conf)
+            if cnn_model is None:
+                st.error("Model not found! 請確保 mnist_cnn.h5 存在")
+                st.stop()
+
+            if mode == "📷 鏡頭 (Live)":
+                run_camera_mode(erosion_iter, dilation_iter, min_conf)
+            elif mode == "✍️ 手寫板 (Canvas)":
+                run_canvas_mode(erosion_iter, dilation_iter, min_conf)
+            elif mode == "📂 上傳 (Upload)":
+                run_upload_mode(erosion_iter, dilation_iter, min_conf)
             
     except Exception as e:
         st.error(f"程式執行發生錯誤: {e}")
