@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V114)", 
+    page_title="Handwriting AI (V115)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,7 +27,7 @@ from sklearn.svm import SVC
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # 參數設定
-STABILITY_DURATION = 1.5    
+STABILITY_DURATION = 3.0    # [V115] 延長至 3.0 秒，給使用者更多準備時間
 MOVEMENT_THRESHOLD = 120    
 ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
@@ -259,7 +259,7 @@ class LiveProcessor(VideoProcessorBase):
         self.erosion = 0
         self.dilation = 0 
         self.min_conf = 0.50 
-        self.strict_mode = True # [V114] 內部預設開啟
+        self.strict_mode = True 
         
         self.last_boxes = []
         self.stability_start_time = None
@@ -399,7 +399,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v114-cam", 
+            key="v115-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
@@ -650,14 +650,13 @@ def main():
                 st.markdown("""
                 <div class="guide-text">
                 <b>💡 調整指南</b><br>
+                • <b>Strict Mode</b>: 打勾後，非數字的塗鴉會被過濾。<br>
                 • <b>Erosion</b>: 數字黏在一起時調大。<br>
-                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。<br>
+                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # [V114] 移除按鈕，預設為 True
                 strict_mode = True 
-                
                 erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0)
                 dilation_iter = 0 
                 min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50)
