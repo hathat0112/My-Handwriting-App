@@ -1,10 +1,10 @@
 import streamlit as st
 
 # ==========================================
-# 0. 頁面設定
+# 0. 頁面設定 - 移除版本號
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI ", 
+    page_title="Handwriting AI", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -438,7 +438,6 @@ class LiveProcessor(VideoProcessorBase):
         cv2.putText(img, status_text, (10, bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, bar_color, 2)
 
 def run_camera_mode(erosion, dilation, min_conf, strict_mode):
-    # [V126] 更新操作指南
     with st.expander("📖 操作指南 (How to use)"):
         st.markdown("""
         <div class="manual-box">
@@ -456,7 +455,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v126-cam", 
+            key="cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
@@ -471,7 +470,8 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
         )
     with col2:
         if ctx.video_processor:
-            ctx.video_processor.update_params(erosion, dilation, min_conf, strict_mode=True)
+            # [修正點] 正確呼叫更新參數，並增加重新掃描按鈕
+            ctx.video_processor.update_params(erosion, dilation, min_conf, True)
             if st.button("🔄 重新掃描", use_container_width=True):
                 ctx.video_processor.resume()
             if ctx.video_processor.frozen:
@@ -569,7 +569,6 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                                max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
                 
                 if roi.size == 0: continue
-                
                 if not check_complexity(roi): continue
 
                 final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=True)
@@ -585,7 +584,8 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 st.dataframe(results_list, hide_index=True, use_container_width=True)
             else:
                 st.info("Waiting for input...")
-                # 補回手寫板模式的 Debug 畫面
+            
+            # [修正點] 補回手寫板模式的 Debug 畫面
             with st.expander("察看結果"):
                 st.image(draw_img, caption="Detection", channels="BGR", use_container_width=True)
         else:
@@ -595,7 +595,7 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
 # 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf, strict_mode):
-    with st.expander("📖 操作指南 (How to use)"):
+    with st.expander("📖 圖片上傳辨識指南 (最佳實踐)"):
         st.markdown("""
         <div class="manual-box">
             <div class="manual-section">
