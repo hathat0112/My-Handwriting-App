@@ -5,18 +5,28 @@ import os
 import time
 import av
 import joblib
-from streamlit_drawable_canvas import st_canvas
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
-from streamlit_image_coordinates import streamlit_image_coordinates
-from tensorflow.keras.models import load_model
-from tensorflow.keras.datasets import mnist
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.svm import SVC
+import sys
+import traceback
+
+# -----------------------------------------------------------------------------
+# 0. 錯誤捕捉啟動 (放在最前面，防止崩潰直接白屏)
+# -----------------------------------------------------------------------------
+try:
+    from streamlit_drawable_canvas import st_canvas
+    from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+    from streamlit_image_coordinates import streamlit_image_coordinates
+    from tensorflow.keras.models import load_model
+    from tensorflow.keras.datasets import mnist
+    from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.svm import SVC
+except ImportError as e:
+    st.error(f"❌ 缺少套件，請檢查安裝: {e}")
+    st.stop()
 
 # ==========================================
-# 0. 頁面設定 & 極簡 CSS 注入
+# 1. 頁面設定 & 極簡 CSS
 # ==========================================
-st.set_page_config(page_title="Handwriting AI", page_icon="✒️", layout="wide")
+st.set_page_config(page_title="Handwriting AI (V89)", page_icon="✒️", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # [V87 舒適對焦參數]
@@ -73,7 +83,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 共用核心
+# 2. 共用核心 (V79/V83/V88 邏輯)
 # ==========================================
 @st.cache_resource
 def load_models():
@@ -83,6 +93,7 @@ def load_models():
         if os.path.exists(f):
             try:
                 cnn = load_model(f)
+                print(f"✅ CNN Loaded: {f}")
                 break
             except: pass
     
@@ -122,7 +133,12 @@ def load_models():
         
     return cnn, knn, svm
 
-cnn_model, knn_model, svm_model = load_models()
+# 嘗試載入模型，失敗不崩潰
+try:
+    cnn_model, knn_model, svm_model = load_models()
+except Exception as e:
+    st.error(f"❌ 模型載入失敗: {e}")
+    st.stop()
 
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
@@ -164,7 +180,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [V88 修改] 增強 2 vs 1 的判斷邏輯
+# [V88] 權威仲裁預測
 def ensemble_predict(roi, min_conf):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -186,10 +202,7 @@ def ensemble_predict(roi, min_conf):
     final_conf = conf_cnn
     details = ""
     
-    # [V88 核心修正] 權威仲裁邏輯
-    # 如果投票結果是 2，但 CNN 覺得是 1
-    # 這通常發生在「有底座的 1」被 KNN 誤判為 2 的情況
-    # 我們這裡強制信任 CNN，因為 CNN 對形狀結構的理解比 KNN 好
+    # V88 權威修正：若 CNN 判 1 但其他人判 2，強制聽 CNN
     if final_lbl == 2 and lbl_cnn == 1:
         final_lbl = 1
         details = " (CNN修正)"
@@ -206,7 +219,7 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式
+# 3. 鏡頭模式 (V87 舒適對焦)
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -221,7 +234,7 @@ class LiveProcessor(VideoProcessorBase):
         self.frozen_frame = None
         self.frame_counter = 0
         
-        # 參數 (V87 舒適設定)
+        # 參數 (V87)
         self.skip_rate = 6  
         self.cached_rois = []
         self.session_start_time = time.time()
@@ -240,114 +253,118 @@ class LiveProcessor(VideoProcessorBase):
         self.session_start_time = time.time()
 
     def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        
-        if not hasattr(self, 'session_start_time') or self.session_start_time is None:
-            self.session_start_time = time.time()
-        is_warming_up = (time.time() - self.session_start_time) < self.warmup_duration
-
-        if self.frozen and self.frozen_frame is not None:
-            return av.VideoFrame.from_ndarray(self.frozen_frame, format="bgr24")
-        
-        display_img = img.copy()
-        h_f, w_f = img.shape[:2]
-        
-        roi_rect = [ROI_MARGIN_X, ROI_MARGIN_Y, w_f - 2*ROI_MARGIN_X, h_f - 2*ROI_MARGIN_Y]
-        roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
-        cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 2)
-
-        self.frame_counter += 1
-        
-        if not (self.frame_counter % self.skip_rate == 0):
-            if len(self.cached_rois) > 0:
-                for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
-                    cv2.rectangle(display_img, (dx, dy), (dx+dw, dy+dh), box_color, 2)
-                    cv2.putText(display_img, txt, (dx, dy-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            if is_warming_up:
-                cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            return av.VideoFrame.from_ndarray(display_img, format="bgr24")
-        
-        roi_img = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
-        if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
-
-        gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
-        binary_proc = v65_morphology(binary, self.erosion, self.dilation)
-        
-        cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        valid_boxes = []
-        raw_boxes_for_stability = []
-        
-        for c in cnts:
-            if cv2.contourArea(c) < 300: continue
-            x, y, w, h = cv2.boundingRect(c)
-            if x<5 or y<5: continue
-            valid_boxes.append((x,y,w,h))
-            raw_boxes_for_stability.append({'box': (x+roi_rect[0], y+roi_rect[1], w, h)})
-        
-        valid_boxes.sort(key=lambda b: b[0])
-        self.cached_rois = []
-        
-        detected_something = False
-        count_id = 1
-        
-        for (x, y, w, h) in valid_boxes:
-            roi = binary_proc[y:y+h, x:x+w]
-            final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
+        try:
+            img = frame.to_ndarray(format="bgr24")
             
-            if final_conf > self.min_conf:
-                detected_something = True
-                rx, ry = x + roi_rect[0], y + roi_rect[1]
-                box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
-                
-                cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
-                txt = f"#{count_id}"
-                draw_label(display_img, txt, rx, ry)
-                self.cached_rois.append((rx, ry, w, h, txt, box_color))
-                count_id += 1
+            if not hasattr(self, 'session_start_time') or self.session_start_time is None:
+                self.session_start_time = time.time()
+            is_warming_up = (time.time() - self.session_start_time) < self.warmup_duration
 
-        if len(raw_boxes_for_stability) == 0:
-            self.stability_start_time = None
-        elif len(self.last_boxes) == 0:
-            self.last_boxes = raw_boxes_for_stability
-            self.stability_start_time = time.time()
-        else:
-            total_movement = 0
-            for curr_box in raw_boxes_for_stability:
-                c_x, c_y, _, _ = curr_box["box"]
-                min_dist = 99999
-                for last_box in self.last_boxes:
-                    l_x, l_y, _, _ = last_box["box"]
-                    dist = abs(c_x - l_x) + abs(c_y - l_y)
-                    if dist < min_dist: min_dist = dist
-                if min_dist < 50: total_movement += min_dist
-                else: total_movement += 30 
+            if self.frozen and self.frozen_frame is not None:
+                return av.VideoFrame.from_ndarray(self.frozen_frame, format="bgr24")
             
-            count_diff = abs(len(raw_boxes_for_stability) - len(self.last_boxes))
-            total_movement += count_diff * 50 
-            self.last_boxes = raw_boxes_for_stability
+            display_img = img.copy()
+            h_f, w_f = img.shape[:2]
+            
+            roi_rect = [ROI_MARGIN_X, ROI_MARGIN_Y, w_f - 2*ROI_MARGIN_X, h_f - 2*ROI_MARGIN_Y]
+            roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
+            cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 2)
 
-            if total_movement < MOVEMENT_THRESHOLD and not is_warming_up:
-                if self.stability_start_time is None: self.stability_start_time = time.time()
-                elapsed = time.time() - self.stability_start_time
-                progress = min(elapsed / STABILITY_DURATION, 1.0)
-                
-                bar_y = h_f - 20 
-                bar_w = int(600 * progress)
-                color = (0, 255, 255) if progress < 1.0 else (0, 255, 0)
-                cv2.rectangle(display_img, (20, bar_y - 15), (20 + bar_w, bar_y), color, -1)
-                cv2.rectangle(display_img, (20, bar_y - 15), (w_f - 20, bar_y), (255, 255, 255), 2)
-                
-                if elapsed >= STABILITY_DURATION and detected_something:
-                    self.frozen = True
-                    self.frozen_frame = display_img.copy()
-            else:
-                self.stability_start_time = time.time()
-                if is_warming_up: 
+            self.frame_counter += 1
+            
+            if not (self.frame_counter % self.skip_rate == 0):
+                if len(self.cached_rois) > 0:
+                    for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
+                        cv2.rectangle(display_img, (dx, dy), (dx+dw, dy+dh), box_color, 2)
+                        cv2.putText(display_img, txt, (dx, dy-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                if is_warming_up:
                     cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                return av.VideoFrame.from_ndarray(display_img, format="bgr24")
+            
+            roi_img = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
+            if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
-        return av.VideoFrame.from_ndarray(display_img, format="bgr24")
+            gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
+            binary_proc = v65_morphology(binary, self.erosion, self.dilation)
+            
+            cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            valid_boxes = []
+            raw_boxes_for_stability = []
+            
+            for c in cnts:
+                if cv2.contourArea(c) < 300: continue
+                x, y, w, h = cv2.boundingRect(c)
+                if x<5 or y<5: continue
+                valid_boxes.append((x,y,w,h))
+                raw_boxes_for_stability.append({'box': (x+roi_rect[0], y+roi_rect[1], w, h)})
+            
+            valid_boxes.sort(key=lambda b: b[0])
+            self.cached_rois = []
+            
+            detected_something = False
+            count_id = 1
+            
+            for (x, y, w, h) in valid_boxes:
+                roi = binary_proc[y:y+h, x:x+w]
+                final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
+                
+                if final_conf > self.min_conf:
+                    detected_something = True
+                    rx, ry = x + roi_rect[0], y + roi_rect[1]
+                    box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
+                    
+                    cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
+                    txt = f"#{count_id}"
+                    draw_label(display_img, txt, rx, ry)
+                    self.cached_rois.append((rx, ry, w, h, txt, box_color))
+                    count_id += 1
+
+            if len(raw_boxes_for_stability) == 0:
+                self.stability_start_time = None
+            elif len(self.last_boxes) == 0:
+                self.last_boxes = raw_boxes_for_stability
+                self.stability_start_time = time.time()
+            else:
+                total_movement = 0
+                for curr_box in raw_boxes_for_stability:
+                    c_x, c_y, _, _ = curr_box["box"]
+                    min_dist = 99999
+                    for last_box in self.last_boxes:
+                        l_x, l_y, _, _ = last_box["box"]
+                        dist = abs(c_x - l_x) + abs(c_y - l_y)
+                        if dist < min_dist: min_dist = dist
+                    if min_dist < 50: total_movement += min_dist
+                    else: total_movement += 30 
+                
+                count_diff = abs(len(raw_boxes_for_stability) - len(self.last_boxes))
+                total_movement += count_diff * 50 
+                self.last_boxes = raw_boxes_for_stability
+
+                if total_movement < MOVEMENT_THRESHOLD and not is_warming_up:
+                    if self.stability_start_time is None: self.stability_start_time = time.time()
+                    elapsed = time.time() - self.stability_start_time
+                    progress = min(elapsed / STABILITY_DURATION, 1.0)
+                    
+                    bar_y = h_f - 20 
+                    bar_w = int(600 * progress)
+                    color = (0, 255, 255) if progress < 1.0 else (0, 255, 0)
+                    cv2.rectangle(display_img, (20, bar_y - 15), (20 + bar_w, bar_y), color, -1)
+                    cv2.rectangle(display_img, (20, bar_y - 15), (w_f - 20, bar_y), (255, 255, 255), 2)
+                    
+                    if elapsed >= STABILITY_DURATION and detected_something:
+                        self.frozen = True
+                        self.frozen_frame = display_img.copy()
+                else:
+                    self.stability_start_time = time.time()
+                    if is_warming_up: 
+                        cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+            return av.VideoFrame.from_ndarray(display_img, format="bgr24")
+        except Exception as e:
+            print(f"Frame Error: {e}")
+            return av.VideoFrame.from_ndarray(frame.to_ndarray(format="bgr24"), format="bgr24")
 
 def run_camera_mode(erosion, dilation, min_conf):
     st.caption("請將數字置於鏡頭中央，穩定後自動抓拍")
@@ -373,7 +390,7 @@ def run_camera_mode(erosion, dilation, min_conf):
                 st.info("⏳ 偵測中...")
 
 # ==========================================
-# 3. 手寫板模式
+# 4. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
@@ -462,7 +479,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (V83 邏輯 + V88 預測修正)
+# 5. 上傳模式 (V83 邏輯 + V88 預測)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     
@@ -489,6 +506,7 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
+        # BlackHat 核心 (V79)
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
@@ -545,41 +563,45 @@ def run_upload_mode(erosion, dilation, min_conf):
                 st.image(processed, use_container_width=True, caption="BlackHat Vision")
 
 # ==========================================
-# 5. 主程式分流
+# 6. 主程式分流 (全域 Try-Catch)
 # ==========================================
 def main():
-    st.title("HANDWRITING AI")
-    
-    st.sidebar.header("Settings")
-    # 預設手寫板 (index=1)
-    mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
-    
-    st.sidebar.divider()
-    
-    with st.sidebar.expander("🔧 Advanced Config", expanded=False):
-        st.markdown("""
-        <div class="guide-text">
-        <b>💡 調整指南</b><br>
-        • <b>Erosion (瘦身)</b>: 數字黏在一起時調大。<br>
-        • <b>Dilation (增肥)</b>: 筆畫太淡或斷掉時調大。<br>
-        • <b>Confidence</b>: 雜訊太多時調高。
-        </div>
-        """, unsafe_allow_html=True)
+    try:
+        st.title("HANDWRITING AI")
         
-        erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0, help="把線條變細，用來分開黏在一起的字")
-        dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2, help="把線條變粗，用來連接斷掉的筆畫")
-        min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字")
+        st.sidebar.header("Settings")
+        mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
+        
+        st.sidebar.divider()
+        
+        with st.sidebar.expander("🔧 Advanced Config", expanded=False):
+            st.markdown("""
+            <div class="guide-text">
+            <b>💡 調整指南</b><br>
+            • <b>Erosion (瘦身)</b>: 數字黏在一起時調大。<br>
+            • <b>Dilation (增肥)</b>: 筆畫太淡或斷掉時調大。<br>
+            • <b>Confidence</b>: 雜訊太多時調高。
+            </div>
+            """, unsafe_allow_html=True)
+            
+            erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0, help="把線條變細，用來分開黏在一起的字")
+            dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2, help="把線條變粗，用來連接斷掉的筆畫")
+            min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字")
 
-    if cnn_model is None:
-        st.error("Model not found!")
-        st.stop()
+        if cnn_model is None:
+            st.error("❌ Model not found! 請確保 mnist_cnn.h5 存在")
+            st.stop()
 
-    if mode == "📷 鏡頭 (Live)":
-        run_camera_mode(erosion_iter, dilation_iter, min_conf)
-    elif mode == "✍️ 手寫板 (Canvas)":
-        run_canvas_mode(erosion_iter, dilation_iter, min_conf)
-    elif mode == "📂 上傳 (Upload)":
-        run_upload_mode(erosion_iter, dilation_iter, min_conf)
+        if mode == "📷 鏡頭 (Live)":
+            run_camera_mode(erosion_iter, dilation_iter, min_conf)
+        elif mode == "✍️ 手寫板 (Canvas)":
+            run_canvas_mode(erosion_iter, dilation_iter, min_conf)
+        elif mode == "📂 上傳 (Upload)":
+            run_upload_mode(erosion_iter, dilation_iter, min_conf)
+            
+    except Exception as e:
+        st.error("🔥 發生非預期錯誤，請截圖給開發者：")
+        st.exception(e)
 
 if __name__ == "__main__":
     main()
