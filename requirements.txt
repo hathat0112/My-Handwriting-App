@@ -1,12 +1,10 @@
 streamlit
-streamlit-webrtc
-streamlit-drawable-canvas
-streamlit-image-coordinates
 opencv-python-headless
+numpy
 tensorflow-cpu
 scikit-learn
+streamlit-drawable-canvas
+streamlit-webrtc
+streamlit-image-coordinates
 joblib
 av
-numpy
-pandas
-pillow
