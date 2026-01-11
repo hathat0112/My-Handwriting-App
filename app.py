@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V98)", 
+    page_title="Handwriting AI (V99)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -34,7 +34,7 @@ ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
-# CSS 修飾
+# CSS 修飾 (保持 V98 的沉浸式風格)
 st.markdown("""
 <style>
     header[data-testid="stHeader"] {background-color: transparent; z-index: 999;}
@@ -51,7 +51,6 @@ st.markdown("""
     .welcome-title {font-size: 3rem; font-weight: 700; margin-bottom: 1rem; color: #333;}
     .welcome-desc {font-size: 1.2rem; color: #666; margin-bottom: 2rem;}
     
-    /* 深色模式適配 */
     @media (prefers-color-scheme: dark) {
         .welcome-title {color: #ddd;}
         .welcome-desc {color: #aaa;}
@@ -156,40 +155,43 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [V88] 權威仲裁
+# [V99 核心變更] CNN 主導判斷模式
 def ensemble_predict(roi, min_conf):
+    # 1. 取得 CNN 判斷結果 (這是主角)
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
     lbl_cnn = np.argmax(pred_cnn)
     conf_cnn = np.max(pred_cnn)
     
+    # 2. 取得傳統模型判斷結果 (這是配角)
     lbl_knn = -1
     if knn_model: lbl_knn = knn_model.predict(flat_in)[0]
     lbl_svm = -1
     if svm_model: lbl_svm = svm_model.predict(flat_in)[0]
     
-    votes = [lbl_cnn]
-    if knn_model: votes.append(lbl_knn)
-    if svm_model: votes.append(lbl_svm)
-    
-    final_lbl = max(set(votes), key=votes.count)
-    vote_count = votes.count(final_lbl)
-    
+    # 3. 決策邏輯：以 CNN 為主
+    final_lbl = lbl_cnn
     final_conf = conf_cnn
     details = ""
     
-    if final_lbl == 2 and lbl_cnn == 1:
-        final_lbl = 1
-        details = " (CNN修正)"
-    elif vote_count == len(votes):
-        final_conf = min(0.99, final_conf + 0.1)
-    elif vote_count >= 2:
-        if lbl_cnn != final_lbl:
-            final_conf -= 0.15
-            details = f" (CNN:{lbl_cnn})"
+    # 4. 輔助檢查：看看傳統模型是否同意
+    agree_count = 0
+    if knn_model and lbl_knn == lbl_cnn: agree_count += 1
+    if svm_model and lbl_svm == lbl_cnn: agree_count += 1
+    
+    # 如果大家都同意，信心度加分
+    if agree_count == 2:
+        final_conf = min(0.99, final_conf + 0.05)
     else:
-        final_conf -= 0.3
-        details = f" (分歧: C{lbl_cnn}/K{lbl_knn}/S{lbl_svm})"
+        # 如果有人反對，信心度扣分，並標註異議者
+        final_conf = max(0.0, final_conf - 0.15)
+        
+        disagreements = []
+        if knn_model and lbl_knn != lbl_cnn: disagreements.append(f"K:{lbl_knn}")
+        if svm_model and lbl_svm != lbl_cnn: disagreements.append(f"S:{lbl_svm}")
+        
+        if disagreements:
+            details = f" ({'/'.join(disagreements)})"
         
     return final_lbl, final_conf, details
 
@@ -485,7 +487,6 @@ def run_upload_mode(erosion, dilation, min_conf):
             if w * h > (img_h * img_w * 0.9): continue
             
             # [V98 核心修正] 邊緣過濾：如果方框底部太接近圖片邊緣，視為雜訊
-            # img_h - 10 表示只保留距離底部至少 10px 的物件
             if y + h > img_h - 10: 
                 continue 
 
@@ -522,15 +523,13 @@ def run_upload_mode(erosion, dilation, min_conf):
                 st.image(processed, use_container_width=True, caption="BlackHat Vision")
 
 # ==========================================
-# 5. 主程式分流
+# 5. 主程式分流 (含歡迎頁面)
 # ==========================================
 def main():
     try:
-        # 狀態初始化
         if 'page' not in st.session_state:
             st.session_state['page'] = 'welcome'
 
-        # --- 歡迎首頁 ---
         if st.session_state['page'] == 'welcome':
             st.markdown("<br><br>", unsafe_allow_html=True)
             c1, c2, c3 = st.columns([1, 2, 1])
@@ -549,7 +548,6 @@ def main():
                     st.session_state['page'] = 'app'
                     st.rerun()
 
-        # --- 主程式介面 ---
         elif st.session_state['page'] == 'app':
             st.title("HANDWRITING AI")
             
