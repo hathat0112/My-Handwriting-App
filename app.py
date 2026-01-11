@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V107)", 
+    page_title="Handwriting AI (V108)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -192,7 +192,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [V107] 寬容嚴格模式：如果 CNN 信心夠高 (>0.9)，即使別人反對也不過濾
+# [V108] 將嚴格模式的 CNN 強制覆蓋門檻調整為 0.85
 def ensemble_predict(roi, min_conf, strict_mode=False):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -212,12 +212,12 @@ def ensemble_predict(roi, min_conf, strict_mode=False):
     if knn_model and lbl_knn == lbl_cnn: agree_count += 1
     if svm_model and lbl_svm == lbl_cnn: agree_count += 1
     
-    # 嚴格模式邏輯 (V107 修正版)
+    # 嚴格模式邏輯
     if strict_mode:
         # 如果大家意見不合...
         if (knn_model and lbl_knn != lbl_cnn) or (svm_model and lbl_svm != lbl_cnn):
-            # 除非 CNN 超級有把握 (>90%)，否則淘汰
-            if final_conf < 0.90:
+            # [V108 修改] 只要 CNN 信心 > 85%，就強制採信
+            if final_conf < 0.85:
                 return -1, 0.0, " (Disagree)"
         
         # 即使大家同意，信心太低也不行
@@ -350,7 +350,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v107-cam", 
+            key="v108-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
