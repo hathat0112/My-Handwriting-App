@@ -20,9 +20,9 @@ st.set_page_config(page_title="Handwriting AI", page_icon="✒️", layout="wide
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # [V87 舒適對焦參數]
-STABILITY_DURATION = 1.5  # 1.5秒：不快也不慢，剛好夠對準
-MOVEMENT_THRESHOLD = 120  # 容許手部自然晃動
-CONFIDENCE_THRESHOLD = 0.60 # 降低門檻，讓數字更容易被「吸住」
+STABILITY_DURATION = 1.5  
+MOVEMENT_THRESHOLD = 120  
+CONFIDENCE_THRESHOLD = 0.60 
 ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
@@ -73,7 +73,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 共用核心 (保持 V79/V83 最佳邏輯)
+# 1. 共用核心
 # ==========================================
 @st.cache_resource
 def load_models():
@@ -164,6 +164,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
+# [V88 修改] 增強 2 vs 1 的判斷邏輯
 def ensemble_predict(roi, min_conf):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -185,7 +186,14 @@ def ensemble_predict(roi, min_conf):
     final_conf = conf_cnn
     details = ""
     
-    if vote_count == len(votes):
+    # [V88 核心修正] 權威仲裁邏輯
+    # 如果投票結果是 2，但 CNN 覺得是 1
+    # 這通常發生在「有底座的 1」被 KNN 誤判為 2 的情況
+    # 我們這裡強制信任 CNN，因為 CNN 對形狀結構的理解比 KNN 好
+    if final_lbl == 2 and lbl_cnn == 1:
+        final_lbl = 1
+        details = " (CNN修正)"
+    elif vote_count == len(votes):
         final_conf = min(0.99, final_conf + 0.1)
     elif vote_count >= 2:
         if lbl_cnn != final_lbl:
@@ -198,7 +206,7 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (V87 舒適對焦)
+# 2. 鏡頭模式
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -213,12 +221,11 @@ class LiveProcessor(VideoProcessorBase):
         self.frozen_frame = None
         self.frame_counter = 0
         
-        # [V87 設定]
-        # 跳幀率 6 (約 5 FPS)：畫面不閃爍，但也跟得上移動
+        # 參數 (V87 舒適設定)
         self.skip_rate = 6  
         self.cached_rois = []
         self.session_start_time = time.time()
-        self.warmup_duration = 2.0 # 給使用者 2 秒鐘準備
+        self.warmup_duration = 2.0 
 
     def update_params(self, ero, dil, conf):
         self.erosion = ero
@@ -251,7 +258,6 @@ class LiveProcessor(VideoProcessorBase):
 
         self.frame_counter += 1
         
-        # 跳幀邏輯
         if not (self.frame_counter % self.skip_rate == 0):
             if len(self.cached_rois) > 0:
                 for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
@@ -261,7 +267,6 @@ class LiveProcessor(VideoProcessorBase):
                 cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
             return av.VideoFrame.from_ndarray(display_img, format="bgr24")
         
-        # 影像處理
         roi_img = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
         if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
@@ -289,12 +294,9 @@ class LiveProcessor(VideoProcessorBase):
         
         for (x, y, w, h) in valid_boxes:
             roi = binary_proc[y:y+h, x:x+w]
+            final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
             
-            # 使用 CONFIDENCE_THRESHOLD (0.60) 進行寬鬆判定
-            final_lbl, final_conf, _ = ensemble_predict(roi, CONFIDENCE_THRESHOLD)
-            
-            # 只要超過寬鬆門檻就視為偵測到
-            if final_conf > CONFIDENCE_THRESHOLD:
+            if final_conf > self.min_conf:
                 detected_something = True
                 rx, ry = x + roi_rect[0], y + roi_rect[1]
                 box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
@@ -305,7 +307,6 @@ class LiveProcessor(VideoProcessorBase):
                 self.cached_rois.append((rx, ry, w, h, txt, box_color))
                 count_id += 1
 
-        # 穩定度與抓拍邏輯
         if len(raw_boxes_for_stability) == 0:
             self.stability_start_time = None
         elif len(self.last_boxes) == 0:
@@ -327,7 +328,6 @@ class LiveProcessor(VideoProcessorBase):
             total_movement += count_diff * 50 
             self.last_boxes = raw_boxes_for_stability
 
-            # V87: 寬鬆的移動判定，確保不會一直斷掉
             if total_movement < MOVEMENT_THRESHOLD and not is_warming_up:
                 if self.stability_start_time is None: self.stability_start_time = time.time()
                 elapsed = time.time() - self.stability_start_time
@@ -462,7 +462,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (V83 邏輯 - 變數修復)
+# 4. 上傳模式 (V83 邏輯 + V88 預測修正)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     
@@ -480,7 +480,6 @@ def run_upload_mode(erosion, dilation, min_conf):
         file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
         img_origin = cv2.imdecode(file_bytes, 1)
         
-        # [變數命名修正] 避免衝突
         img_h, img_w = img_origin.shape[:2]
         
         if img_w > 1000:
@@ -490,7 +489,6 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # BlackHat 核心
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
@@ -505,12 +503,11 @@ def run_upload_mode(erosion, dilation, min_conf):
         valid_boxes_data = []
         for c in cnts:
             area = cv2.contourArea(c)
-            if area < 80: continue # 寬鬆門檻
+            if area < 80: continue 
             
             x, y, w, h = cv2.boundingRect(c)
             if w < 10 and h < 10: continue
             
-            # [邏輯修正]
             if w * h > (img_h * img_w * 0.9): continue
             
             roi = processed[y:y+h, x:x+w]
