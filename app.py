@@ -1,13 +1,13 @@
 import streamlit as st
 
 # ==========================================
-# 0. 頁面設定 (強制展開側邊欄 + 寬版佈局)
+# 0. 頁面設定 (必須是第一行)
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V94)", 
+    page_title="Handwriting AI (V95)", 
     page_icon="✒️", 
     layout="wide",
-    initial_sidebar_state="expanded"  # [關鍵修正] 強制展開側邊欄清單
+    initial_sidebar_state="expanded"
 )
 
 import cv2
@@ -24,10 +24,10 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
-# 環境變數設定
+# 環境變數
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-# [V90 鏡頭參數：舒適對焦設定]
+# 參數設定
 STABILITY_DURATION = 1.5    
 MOVEMENT_THRESHOLD = 120    
 CONFIDENCE_THRESHOLD = 0.60 
@@ -35,53 +35,47 @@ ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
-# [V94 介面強力修復]
+# [V95 CSS 修復] 自動適應深淺模式，並強化邊界可視性
 st.markdown("""
 <style>
-    /* 1. 強制背景為白色 (解決深色模式怪怪的問題) */
-    .stApp {
-        background-color: #ffffff;
-    }
-    
-    /* 2. 強制側邊欄為亮灰色 */
-    section[data-testid="stSidebar"] {
-        background-color: #f8f9fa;
-        border-right: 1px solid #eaeaea;
-    }
-    
-    /* 3. 強制文字顏色為深黑 (避免在白底上顯示白字) */
-    h1, h2, h3, h4, h5, h6, p, span, label, div, .stMarkdown {
-        color: #31333F !important;
-    }
-    
-    /* 4. 確保左上角選單按鈕永遠可見 */
+    /* 1. 確保選單按鈕可見 */
     header[data-testid="stHeader"] {
-        background-color: rgba(0,0,0,0);
-        visibility: visible !important;
+        background-color: transparent;
+        z-index: 999;
     }
     
-    /* 5. 按鈕樣式優化 (黑底白字) */
+    /* 2. 側邊欄優化 (不強制顏色，讓它跟隨系統，但加強分隔線) */
+    section[data-testid="stSidebar"] {
+        border-right: 1px solid rgba(128, 128, 128, 0.2);
+    }
+    
+    /* 3. 按鈕通用樣式：在深淺模式下都顯眼的深灰色 */
     .stButton>button {
-        background-color: #2b2b2b !important;
+        background-color: #4a4a4a !important;
         color: white !important;
         border-radius: 8px;
-        border: none;
-        padding: 0.5rem 1rem;
-        font-weight: 500;
+        border: 1px solid #666;
         transition: all 0.3s ease;
     }
     .stButton>button:hover {
-        background-color: #4a4a4a !important;
-        transform: translateY(-2px);
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        background-color: #FF4B4B !important; /* 懸停變紅色，更明顯 */
+        border-color: #FF4B4B;
+        transform: scale(1.02);
     }
-    
-    /* 6. 隱藏頁尾 */
+
+    /* 4. [關鍵] 畫布邊框：確保在黑色背景下也能看到黑色畫布 */
+    iframe[title="streamlit_drawable_canvas.st_canvas"] {
+        border: 2px solid #888;
+        border-radius: 5px;
+        box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+
+    /* 5. 隱藏 Footer */
     footer {visibility: hidden;}
     
-    /* 7. 修正 Radio Button 文字顏色 */
-    .stRadio label {
-        color: #31333F !important;
+    /* 6. 調整文字行高，閱讀更舒適 */
+    .block-container {
+        padding-top: 2rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -140,7 +134,7 @@ def load_models():
 try:
     cnn_model, knn_model, svm_model = load_models()
 except Exception as e:
-    st.error(f"❌ 模型載入失敗，請檢查 requirements.txt 是否包含 tensorflow-cpu。錯誤訊息: {e}")
+    st.error(f"❌ 模型載入失敗: {e}")
     st.stop()
 
 def v65_morphology(binary_img, erosion, dilation):
@@ -183,7 +177,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [V88] 權威仲裁預測 (修正 1 被誤判為 2 的問題)
+# [V88] 權威仲裁
 def ensemble_predict(roi, min_conf):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -205,7 +199,6 @@ def ensemble_predict(roi, min_conf):
     final_conf = conf_cnn
     details = ""
     
-    # [權威修正] 若 CNN 判斷為 1，但其他判斷為 2，強制聽 CNN 的
     if final_lbl == 2 and lbl_cnn == 1:
         final_lbl = 1
         details = " (CNN修正)"
@@ -222,7 +215,7 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (V87 舒適對焦邏輯)
+# 2. 鏡頭模式
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -230,14 +223,11 @@ class LiveProcessor(VideoProcessorBase):
         self.erosion = 0
         self.dilation = 2
         self.min_conf = 0.5
-        
         self.last_boxes = []
         self.stability_start_time = None
         self.frozen = False
         self.frozen_frame = None
         self.frame_counter = 0
-        
-        # [V90 設定] 舒適對焦：每 6 幀偵測一次
         self.skip_rate = 6  
         self.cached_rois = []
         self.session_start_time = time.time()
@@ -275,7 +265,6 @@ class LiveProcessor(VideoProcessorBase):
 
             self.frame_counter += 1
             
-            # 跳幀邏輯：減少 CPU 負擔，增加流暢度
             if not (self.frame_counter % self.skip_rate == 0):
                 if len(self.cached_rois) > 0:
                     for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
@@ -312,21 +301,18 @@ class LiveProcessor(VideoProcessorBase):
             
             for (x, y, w, h) in valid_boxes:
                 roi = binary_proc[y:y+h, x:x+w]
-                # 使用 V87 的寬鬆門檻 (0.60) 進行判定
                 final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
                 
                 if final_conf > self.min_conf:
                     detected_something = True
                     rx, ry = x + roi_rect[0], y + roi_rect[1]
                     box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
-                    
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
                     txt = f"#{count_id}"
                     draw_label(display_img, txt, rx, ry)
                     self.cached_rois.append((rx, ry, w, h, txt, box_color))
                     count_id += 1
 
-            # 穩定度與抓拍邏輯
             if len(raw_boxes_for_stability) == 0:
                 self.stability_start_time = None
             elif len(self.last_boxes) == 0:
@@ -353,7 +339,6 @@ class LiveProcessor(VideoProcessorBase):
                     elapsed = time.time() - self.stability_start_time
                     progress = min(elapsed / STABILITY_DURATION, 1.0)
                     
-                    # 繪製進度條
                     bar_y = h_f - 20 
                     bar_w = int(600 * progress)
                     color = (0, 255, 255) if progress < 1.0 else (0, 255, 0)
@@ -375,7 +360,6 @@ class LiveProcessor(VideoProcessorBase):
 def run_camera_mode(erosion, dilation, min_conf):
     st.caption("請將數字置於鏡頭中央，穩定後自動抓拍")
     col1, col2 = st.columns([3, 1])
-    
     with col1:
         ctx = webrtc_streamer(
             key="v65-cam",
@@ -383,13 +367,11 @@ def run_camera_mode(erosion, dilation, min_conf):
             video_processor_factory=LiveProcessor,
             async_processing=True,
         )
-    
     with col2:
         if ctx.video_processor:
             ctx.video_processor.update_params(erosion, dilation, min_conf)
             if st.button("🔄 重新掃描", use_container_width=True):
                 ctx.video_processor.resume()
-                
             if ctx.video_processor.frozen:
                 st.success("✅ 畫面已鎖定")
             else:
@@ -438,7 +420,6 @@ def run_canvas_mode(erosion, dilation, min_conf):
     
     with c2:
         st.subheader("Analysis")
-        
         if canvas_res.image_data is not None and np.max(canvas_res.image_data) > 0:
             raw = canvas_res.image_data.astype(np.uint8)
             img_bgr = cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR) if raw.shape[2] == 4 else raw
@@ -478,17 +459,16 @@ def run_canvas_mode(erosion, dilation, min_conf):
                 st.dataframe(results_list, hide_index=True, use_container_width=True)
             else:
                 st.info("Waiting for input...")
-                
+            
             with st.expander("查看 AI 視覺 (Debug)"):
                 st.image(draw_img, caption="Detection", channels="BGR", use_container_width=True)
         else:
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (保留 V83 邏輯：變數修復+黑帽運算)
+# 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
-    
     file = st.file_uploader("Drop an image here", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
     
     if not file:
@@ -502,8 +482,6 @@ def run_upload_mode(erosion, dilation, min_conf):
     if file:
         file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
         img_origin = cv2.imdecode(file_bytes, 1)
-        
-        # [變數命名修正] 避免與迴圈變數衝突 (V83 修正)
         img_h, img_w = img_origin.shape[:2]
         
         if img_w > 1000:
@@ -513,7 +491,7 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # [核心] 黑帽運算去陰影 (V79 邏輯)
+        # BlackHat 運算
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
@@ -528,12 +506,9 @@ def run_upload_mode(erosion, dilation, min_conf):
         valid_boxes_data = []
         for c in cnts:
             area = cv2.contourArea(c)
-            if area < 80: continue # 寬鬆門檻
-            
+            if area < 80: continue 
             x, y, w, h = cv2.boundingRect(c)
             if w < 10 and h < 10: continue
-            
-            # 使用正確的 img_w 變數
             if w * h > (img_h * img_w * 0.9): continue
             
             roi = processed[y:y+h, x:x+w]
@@ -544,7 +519,6 @@ def run_upload_mode(erosion, dilation, min_conf):
         valid_boxes_data.sort(key=lambda item: (item['rect'][1]//50, item['rect'][0]))
         
         c1, c2 = st.columns([1.5, 1], gap="large")
-        
         with c1:
             display_img = img_origin.copy()
             valid_count = 1
@@ -565,7 +539,6 @@ def run_upload_mode(erosion, dilation, min_conf):
                 st.dataframe(results_list, hide_index=True, use_container_width=True)
             else:
                 st.warning("No digits found.")
-                
             st.divider()
             with st.expander("查看 AI 黑帽運算 (Debug)"):
                 st.image(processed, use_container_width=True, caption="BlackHat Vision")
@@ -575,9 +548,9 @@ def run_upload_mode(erosion, dilation, min_conf):
 # ==========================================
 def main():
     try:
+        st.title("HANDWRITING AI")
         st.sidebar.header("Settings")
         mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
-        
         st.sidebar.divider()
         
         with st.sidebar.expander("🔧 Advanced Config", expanded=False):
