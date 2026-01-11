@@ -1,7 +1,7 @@
 streamlit
 opencv-python-headless
 numpy
-tensorflow-cpu
+tensorflow
 scikit-learn
 streamlit-drawable-canvas
 streamlit-webrtc
