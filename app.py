@@ -585,6 +585,9 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 st.dataframe(results_list, hide_index=True, use_container_width=True)
             else:
                 st.info("Waiting for input...")
+                # 補回手寫板模式的 Debug 畫面
+            with st.expander("察看結果"):
+                st.image(draw_img, caption="Detection", channels="BGR", use_container_width=True)
         else:
             st.markdown("*Ready to analyze...*")
 
