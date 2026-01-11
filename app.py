@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V113)", 
+    page_title="Handwriting AI (V114)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -135,28 +135,17 @@ def get_prediction_img(binary_img, dilation):
         res = cv2.dilate(res, kernel_dil, iterations=dilation)
     return res
 
-# [V113 新增] 複雜度檢查：如果內部結構太複雜(太多洞)，就視為塗鴉
 def check_complexity(roi):
-    # 尋找內部的輪廓
     cnts, hierarchy = cv2.findContours(roi, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # 如果只有一個輪廓(自己)，那是 OK 的
     if len(cnts) <= 1: return True
-    
-    # 計算有幾個「子輪廓」(被包在裡面的洞)
-    # hierarchy[0] 是一個陣列，每個元素是 [Next, Previous, First_Child, Parent]
-    # 我們計算有多少個輪廓是有 Parent 的
     internal_shapes = 0
     if hierarchy is not None:
         for h in hierarchy[0]:
-            if h[3] != -1: # 有 Parent，代表它是內部的洞
+            if h[3] != -1: 
                 internal_shapes += 1
-    
-    # 數字 8 最多只有 2 個洞。如果超過 2 個洞 (例如笑臉有眼睛嘴巴)，就視為塗鴉
     if internal_shapes > 2:
-        return False # 太複雜，不是數字
-        
-    return True # 通過檢查
+        return False 
+    return True
 
 def merge_nearby_boxes(boxes, distance_threshold=20):
     if not boxes: return []
@@ -164,7 +153,6 @@ def merge_nearby_boxes(boxes, distance_threshold=20):
     for (x, y, w, h) in boxes:
         rects.append([x, y, x+w, y+h])
     rects = np.array(rects)
-    
     while True:
         merged = False
         new_rects = []
@@ -187,7 +175,6 @@ def merge_nearby_boxes(boxes, distance_threshold=20):
             new_rects.append([x1, y1, x2, y2])
         if not merged: break
         rects = np.array(new_rects)
-
     final_boxes = []
     for (x1, y1, x2, y2) in rects:
         final_boxes.append((x1, y1, x2-x1, y2-y1))
@@ -201,14 +188,12 @@ def preprocess_input(roi):
     canvas = np.zeros((28, 28), dtype=np.uint8)
     y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
     canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
-    
     m = cv2.moments(canvas, True)
     if m['m00'] > 0.1:
         cX, cY = m['m10'] / m['m00'], m['m01'] / m['m00']
         tX, tY = 14.0 - cX, 14.0 - cY
         M = np.float32([[1, 0, tX], [0, 1, tY]])
         canvas = cv2.warpAffine(canvas, M, (28, 28), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        
     cnn_in = canvas.reshape(1, 28, 28, 1).astype('float32') / 255.0
     flat_in = canvas.reshape(1, 784).astype('float32') / 255.0
     return cnn_in, flat_in
@@ -274,7 +259,7 @@ class LiveProcessor(VideoProcessorBase):
         self.erosion = 0
         self.dilation = 0 
         self.min_conf = 0.50 
-        self.strict_mode = False 
+        self.strict_mode = True # [V114] 內部預設開啟
         
         self.last_boxes = []
         self.stability_start_time = None
@@ -364,9 +349,7 @@ class LiveProcessor(VideoProcessorBase):
                 
                 if roi.size == 0: continue
                 
-                # [V113] 檢查結構複雜度
-                if not check_complexity(roi):
-                    continue # 太複雜，跳過
+                if not check_complexity(roi): continue
 
                 final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf, self.strict_mode)
                 
@@ -389,7 +372,6 @@ class LiveProcessor(VideoProcessorBase):
             else:
                 self.stability_start_time = None
                 
-            # 繪製進度條 (同上版)
             if self.stability_start_time is not None and not is_warming_up:
                 elapsed = current_time - self.stability_start_time
                 progress = min(elapsed / STABILITY_DURATION, 1.0)
@@ -417,7 +399,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v113-cam", 
+            key="v114-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
@@ -518,9 +500,7 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 
                 if roi.size == 0: continue
                 
-                # [V113] 檢查複雜度
-                if not check_complexity(roi):
-                    continue # 是塗鴉，跳過
+                if not check_complexity(roi): continue
 
                 final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
                 
@@ -602,7 +582,6 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             
             if roi.size == 0: continue
             
-            # [V113] 上傳模式也檢查複雜度
             if not check_complexity(roi): continue
 
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
@@ -671,15 +650,15 @@ def main():
                 st.markdown("""
                 <div class="guide-text">
                 <b>💡 調整指南</b><br>
-                • <b>Strict Mode</b>: 打勾後，非數字的塗鴉會被過濾。<br>
                 • <b>Erosion</b>: 數字黏在一起時調大。<br>
-                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。
+                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。<br>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                strict_mode = st.checkbox("Strict Mode (嚴格過濾)", value=True, help="若模型意見不合，則不顯示結果")
+                # [V114] 移除按鈕，預設為 True
+                strict_mode = True 
+                
                 erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0)
-                # Dilation 拉桿已移除，程式內部強制為 0
                 dilation_iter = 0 
                 min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50)
             
