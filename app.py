@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V115)", 
+    page_title="Handwriting AI (V116)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,10 +27,11 @@ from sklearn.svm import SVC
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # 參數設定
-STABILITY_DURATION = 3.0    # [V115] 延長至 3.0 秒，給使用者更多準備時間
+STABILITY_DURATION = 3.0    
 MOVEMENT_THRESHOLD = 120    
-ROI_MARGIN_X = 60
-ROI_MARGIN_Y = 60
+# [V116] 調整邊距：數值越大，藍色框框越小 (越往中間縮)
+ROI_MARGIN_X = 250 
+ROI_MARGIN_Y = 150 
 SHRINK_PX = 4
 
 RTC_CONFIGURATION = RTCConfiguration(
@@ -118,7 +119,6 @@ except Exception as e:
     st.error(f"❌ 模型載入失敗: {e}")
     st.stop()
 
-# 雙層處理邏輯
 def get_contour_mask(binary_img, erosion):
     res = binary_img.copy()
     if erosion > 0:
@@ -399,7 +399,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v115-cam", 
+            key="v116-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
