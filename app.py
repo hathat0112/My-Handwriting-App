@@ -1,9 +1,9 @@
 import streamlit as st
 
 # ==========================================
-# 0. 頁面設定 (必須是第一行指令)
+# 0. 頁面設定 (這是全程式最重要的第一行，不可移動！)
 # ==========================================
-st.set_page_config(page_title="Handwriting AI (V91)", page_icon="✒️", layout="wide")
+st.set_page_config(page_title="Handwriting AI (V90)", page_icon="✒️", layout="wide")
 
 import cv2
 import numpy as np
@@ -19,19 +19,18 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
-# 環境變數
+# 環境變數設定
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-# [V91 鏡頭參數：舒適對焦設定]
-# 參考自 app.py 的 V87 設定，讓鏡頭不會太快也不會太慢
-STABILITY_DURATION = 1.5    # 1.5秒：人類自然的對焦確認時間
+# [V90 鏡頭參數：舒適對焦設定]
+STABILITY_DURATION = 1.5    # 1.5秒：對準後稍停即拍
 MOVEMENT_THRESHOLD = 120    # 容許手部自然晃動
 CONFIDENCE_THRESHOLD = 0.60 # 降低門檻，讓數字更容易被「吸住」
 ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
-# 極簡 CSS 風格 (來自 app (2).py)
+# 極簡 CSS 風格
 st.markdown("""
 <style>
     #MainMenu {visibility: hidden;}
@@ -131,7 +130,7 @@ def load_models():
 try:
     cnn_model, knn_model, svm_model = load_models()
 except Exception as e:
-    st.error(f"❌ 模型載入失敗，請檢查終端機錯誤訊息。")
+    st.error(f"❌ 模型載入失敗，請檢查 requirements.txt 是否包含 tensorflow-cpu。錯誤訊息: {e}")
     st.stop()
 
 def v65_morphology(binary_img, erosion, dilation):
@@ -174,7 +173,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [V88/V91] 預測核心：加入權威仲裁
+# [V88] 權威仲裁預測 (修正 1 被誤判為 2 的問題)
 def ensemble_predict(roi, min_conf):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -196,7 +195,7 @@ def ensemble_predict(roi, min_conf):
     final_conf = conf_cnn
     details = ""
     
-    # 修正邏輯：若 CNN 判斷為 1，但其他判斷為 2，聽 CNN 的 (解決有底座的1誤判問題)
+    # [權威修正] 若 CNN 判斷為 1，但其他判斷為 2，強制聽 CNN 的
     if final_lbl == 2 and lbl_cnn == 1:
         final_lbl = 1
         details = " (CNN修正)"
@@ -213,7 +212,7 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (改用 V87 舒適對焦邏輯)
+# 2. 鏡頭模式 (V87 舒適對焦邏輯)
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -228,7 +227,7 @@ class LiveProcessor(VideoProcessorBase):
         self.frozen_frame = None
         self.frame_counter = 0
         
-        # [V91 設定] 舒適對焦：每 6 幀偵測一次
+        # [V90 設定] 舒適對焦：每 6 幀偵測一次
         self.skip_rate = 6  
         self.cached_rois = []
         self.session_start_time = time.time()
@@ -266,6 +265,7 @@ class LiveProcessor(VideoProcessorBase):
 
             self.frame_counter += 1
             
+            # 跳幀邏輯：減少 CPU 負擔，增加流暢度
             if not (self.frame_counter % self.skip_rate == 0):
                 if len(self.cached_rois) > 0:
                     for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
@@ -302,7 +302,7 @@ class LiveProcessor(VideoProcessorBase):
             
             for (x, y, w, h) in valid_boxes:
                 roi = binary_proc[y:y+h, x:x+w]
-                # 使用 CONFIDENCE_THRESHOLD (0.60) 進行判定
+                # 使用 V87 的寬鬆門檻 (0.60) 進行判定
                 final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
                 
                 if final_conf > self.min_conf:
@@ -316,6 +316,7 @@ class LiveProcessor(VideoProcessorBase):
                     self.cached_rois.append((rx, ry, w, h, txt, box_color))
                     count_id += 1
 
+            # 穩定度與抓拍邏輯
             if len(raw_boxes_for_stability) == 0:
                 self.stability_start_time = None
             elif len(self.last_boxes) == 0:
@@ -342,6 +343,7 @@ class LiveProcessor(VideoProcessorBase):
                     elapsed = time.time() - self.stability_start_time
                     progress = min(elapsed / STABILITY_DURATION, 1.0)
                     
+                    # 繪製進度條
                     bar_y = h_f - 20 
                     bar_w = int(600 * progress)
                     color = (0, 255, 255) if progress < 1.0 else (0, 255, 0)
@@ -384,7 +386,7 @@ def run_camera_mode(erosion, dilation, min_conf):
                 st.info("⏳ 偵測中...")
 
 # ==========================================
-# 3. 手寫板模式 (保留 app (2).py 邏輯)
+# 3. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
@@ -473,7 +475,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (保留 app (2).py 邏輯：變數修復+黑帽運算)
+# 4. 上傳模式 (保留 V83 邏輯：變數修復+黑帽運算)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     
