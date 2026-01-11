@@ -435,11 +435,11 @@ def main():
     st.title("HANDWRITING AI")
     
     st.sidebar.header("Settings")
-    mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"])
+    # [修正] index=1 讓預設值變成 "手寫板" (List 中的第 2 個選項)
+    mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
     
     st.sidebar.divider()
     
-    # [新增] 參數調整指南 & Tooltips
     with st.sidebar.expander("🔧 Advanced Config", expanded=False):
         st.markdown("""
         <div class="guide-text">
