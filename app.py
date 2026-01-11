@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定 (必須是第一行)
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V95)", 
+    page_title="Handwriting AI (V96)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -35,7 +35,7 @@ ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
-# [V95 CSS 修復] 自動適應深淺模式，並強化邊界可視性
+# [V96 CSS 修復] 移除畫布邊框，達成沉浸式效果
 st.markdown("""
 <style>
     /* 1. 確保選單按鈕可見 */
@@ -44,36 +44,40 @@ st.markdown("""
         z-index: 999;
     }
     
-    /* 2. 側邊欄優化 (不強制顏色，讓它跟隨系統，但加強分隔線) */
+    /* 2. 側邊欄樣式 */
     section[data-testid="stSidebar"] {
         border-right: 1px solid rgba(128, 128, 128, 0.2);
     }
     
-    /* 3. 按鈕通用樣式：在深淺模式下都顯眼的深灰色 */
+    /* 3. 按鈕通用樣式 */
     .stButton>button {
         background-color: #4a4a4a !important;
         color: white !important;
         border-radius: 8px;
-        border: 1px solid #666;
+        border: none;
         transition: all 0.3s ease;
     }
     .stButton>button:hover {
-        background-color: #FF4B4B !important; /* 懸停變紅色，更明顯 */
-        border-color: #FF4B4B;
+        background-color: #FF4B4B !important;
         transform: scale(1.02);
     }
 
-    /* 4. [關鍵] 畫布邊框：確保在黑色背景下也能看到黑色畫布 */
+    /* 4. [關鍵修正] 移除畫布的所有邊框與陰影 */
     iframe[title="streamlit_drawable_canvas.st_canvas"] {
-        border: 2px solid #888;
-        border-radius: 5px;
-        box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        border: none !important;
+        box-shadow: none !important;
+        background-color: transparent !important;
+    }
+    
+    /* 5. 確保畫布外層容器也是透明的，消除"白底" */
+    div[data-testid="stVerticalBlock"] > div {
+        background-color: transparent;
     }
 
-    /* 5. 隱藏 Footer */
+    /* 6. 隱藏 Footer */
     footer {visibility: hidden;}
     
-    /* 6. 調整文字行高，閱讀更舒適 */
+    /* 7. 調整頂部間距 */
     .block-container {
         padding-top: 2rem;
     }
