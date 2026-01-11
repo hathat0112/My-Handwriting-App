@@ -19,21 +19,12 @@ from sklearn.svm import SVC
 st.set_page_config(page_title="Handwriting AI", page_icon="✒️", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-# 自定義 CSS：極簡黑白風格 + Tooltip 優化
 st.markdown("""
 <style>
-    /* 隱藏預設選單與 Footer */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    
-    /* 全局字體優化 */
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-    }
-    
-    /* 按鈕風格：黑底白字圓角 */
+    .block-container {padding-top: 2rem; padding-bottom: 2rem;}
     .stButton>button {
         background-color: #2b2b2b;
         color: white;
@@ -48,27 +39,19 @@ st.markdown("""
         transform: translateY(-2px);
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
-    
-    /* 標題置中與風格化 */
     h1 {
         text-align: center;
         font-weight: 300 !important;
         letter-spacing: 2px;
         margin-bottom: 2rem !important;
     }
-    
-    /* 側邊欄優化 */
     section[data-testid="stSidebar"] {
         background-color: #f8f9fa;
         border-right: 1px solid #eaeaea;
     }
-    
-    /* 卡片式容器 */
     div[data-testid="stVerticalBlock"] > div {
         border-radius: 10px;
     }
-    
-    /* 說明文字風格 */
     .guide-text {
         font-size: 0.85rem;
         color: #666;
@@ -82,11 +65,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 共用核心 (V79 BlackHat 邏輯)
+# 1. 共用核心
 # ==========================================
 @st.cache_resource
 def load_models():
-    # 1. CNN
     cnn = None
     model_files = ["cnn_model_robust.h5", "mnist_cnn.h5", "cnn_model.h5"]
     for f in model_files:
@@ -96,7 +78,6 @@ def load_models():
                 break
             except: pass
     
-    # 2. 訓練資料
     x_flat = None
     y_train = None
     try:
@@ -105,7 +86,6 @@ def load_models():
         y_train = y_raw[:10000]
     except: pass
 
-    # 3. KNN
     knn = None
     knn_path = "knn_model.pkl"
     if os.path.exists(knn_path):
@@ -119,7 +99,6 @@ def load_models():
             joblib.dump(knn, knn_path)
         except: pass
 
-    # 4. SVM
     svm = None
     svm_path = "svm_model.pkl"
     if os.path.exists(svm_path):
@@ -352,7 +331,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (V79 BlackHat 核心)
+# 4. 上傳模式 (修正變數衝突 Bug)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     
@@ -369,13 +348,19 @@ def run_upload_mode(erosion, dilation, min_conf):
     if file:
         file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
         img_origin = cv2.imdecode(file_bytes, 1)
-        h, w = img_origin.shape[:2]
-        if w > 1000:
-            scale = 1000 / w
-            img_origin = cv2.resize(img_origin, (1000, int(h * scale)))
+        
+        # [變數命名修正] 使用 img_h, img_w 避免與迴圈內的 h, w 衝突
+        img_h, img_w = img_origin.shape[:2]
+        
+        # 縮放過大圖片
+        if img_w > 1000:
+            scale = 1000 / img_w
+            img_origin = cv2.resize(img_origin, (1000, int(img_h * scale)))
+            img_h, img_w = img_origin.shape[:2] # 更新縮放後的尺寸
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
+        # BlackHat 核心
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
@@ -389,10 +374,15 @@ def run_upload_mode(erosion, dilation, min_conf):
         
         valid_boxes_data = []
         for c in cnts:
-            if cv2.contourArea(c) < 150: continue 
+            area = cv2.contourArea(c)
+            # [門檻放寬] 因為圖片被縮小且鉛筆字細，門檻降到 80
+            if area < 80: continue 
+            
             x, y, w, h = cv2.boundingRect(c)
-            if w < 20 and h < 20: continue
-            if w * h > (h * w * 0.9): continue
+            if w < 10 and h < 10: continue
+            
+            # [邏輯修正] 使用正確的圖片尺寸變數
+            if w * h > (img_h * img_w * 0.9): continue
             
             roi = processed[y:y+h, x:x+w]
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
@@ -435,7 +425,7 @@ def main():
     st.title("HANDWRITING AI")
     
     st.sidebar.header("Settings")
-    # [修正] index=1 讓預設值變成 "手寫板" (List 中的第 2 個選項)
+    # 預設手寫板 (index=1)
     mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
     
     st.sidebar.divider()
