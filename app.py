@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V106)", 
+    page_title="Handwriting AI (V107)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -173,7 +173,6 @@ def preprocess_input(roi):
     y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
     canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
     
-    # 再次使用中心矩對齊
     m = cv2.moments(canvas, True)
     if m['m00'] > 0.1:
         cX, cY = m['m10'] / m['m00'], m['m01'] / m['m00']
@@ -193,7 +192,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [V106 核心] 嚴格模式：如果大家意見不合，就當作沒看到
+# [V107] 寬容嚴格模式：如果 CNN 信心夠高 (>0.9)，即使別人反對也不過濾
 def ensemble_predict(roi, min_conf, strict_mode=False):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -213,13 +212,15 @@ def ensemble_predict(roi, min_conf, strict_mode=False):
     if knn_model and lbl_knn == lbl_cnn: agree_count += 1
     if svm_model and lbl_svm == lbl_cnn: agree_count += 1
     
-    # [V106] 嚴格模式邏輯
+    # 嚴格模式邏輯 (V107 修正版)
     if strict_mode:
-        # 只要有一個模型反對，就直接淘汰 (回傳 -1)
+        # 如果大家意見不合...
         if (knn_model and lbl_knn != lbl_cnn) or (svm_model and lbl_svm != lbl_cnn):
-            return -1, 0.0, " (Disagree)"
+            # 除非 CNN 超級有把握 (>90%)，否則淘汰
+            if final_conf < 0.90:
+                return -1, 0.0, " (Disagree)"
         
-        # 即使大家同意，信心度不夠高也淘汰
+        # 即使大家同意，信心太低也不行
         if final_conf < 0.8:
             return -1, 0.0, " (Low Conf)"
 
@@ -247,7 +248,7 @@ class LiveProcessor(VideoProcessorBase):
         self.erosion = 0
         self.dilation = 2 
         self.min_conf = 0.50 
-        self.strict_mode = False # 鏡頭模式預設不嚴格，不然會很難抓
+        self.strict_mode = False 
         
         self.last_boxes = []
         self.stability_start_time = None
@@ -329,7 +330,6 @@ class LiveProcessor(VideoProcessorBase):
                 roi = binary_proc[y:y+h, x:x+w]
                 final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf, self.strict_mode)
                 
-                # 若被嚴格模式過濾 (return -1)，就不顯示
                 if final_lbl != -1 and final_conf > self.min_conf:
                     rx, ry = x + roi_rect[0], y + roi_rect[1]
                     box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
@@ -350,7 +350,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v106-cam", 
+            key="v107-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
@@ -374,7 +374,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
                 st.info("⏳ 偵測中...")
 
 # ==========================================
-# 3. 手寫板模式 (V106: 專用優化)
+# 3. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
@@ -423,13 +423,11 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            # 手寫板不做形狀過濾，但大幅提高面積門檻以過濾噪點
             cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             raw_boxes = []
             for c in cnts:
                 area = cv2.contourArea(c)
-                # [V106] 手寫板門檻調高到 400，避免抓到細小雜點
                 if area < 400: continue 
                 x, y, w, h = cv2.boundingRect(c)
                 if h < 20 or w < 10: continue 
@@ -446,7 +444,6 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 roi = processed[y:y+h, x:x+w]
                 final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
                 
-                # 如果不是 -1 (被嚴格模式刷掉) 且信心度夠高才顯示
                 if final_lbl != -1 and final_conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
                     draw_label(draw_img, f"#{valid_count}", x, y)
@@ -589,9 +586,7 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # [V106] 新增嚴格模式開關，預設開啟
                 strict_mode = st.checkbox("Strict Mode (嚴格過濾)", value=True, help="若模型意見不合，則不顯示結果")
-                
                 erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0)
                 dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2)
                 min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50)
