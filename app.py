@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V118)", 
+    page_title="Handwriting AI (V119)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,8 +27,8 @@ from sklearn.svm import SVC
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # 參數設定
-STABILITY_DURATION = 3.0    
-MOVEMENT_THRESHOLD = 120    
+STABILITY_DURATION = 3.0    # 需穩定 3 秒
+MOVEMENT_THRESHOLD = 70     # [V119] 晃動超過此數值(像素)，進度條重置
 SHRINK_PX = 4
 
 RTC_CONFIGURATION = RTCConfiguration(
@@ -248,7 +248,7 @@ def ensemble_predict(roi, min_conf, strict_mode=False):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式
+# 2. 鏡頭模式 (V119: 恢復並強化防手震)
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -258,7 +258,8 @@ class LiveProcessor(VideoProcessorBase):
         self.min_conf = 0.50 
         self.strict_mode = True 
         
-        self.last_boxes = []
+        self.last_boxes = [] # 保留此變數，但在 V119 改用 last_centers 進行更精確的比對
+        self.last_centers = [] # [V119] 記錄上一幀的中心點
         self.stability_start_time = None
         self.frozen = False
         self.frozen_frame = None
@@ -278,6 +279,7 @@ class LiveProcessor(VideoProcessorBase):
         self.frozen = False
         self.stability_start_time = None
         self.last_boxes = []
+        self.last_centers = []
         self.cached_rois = []
         self.session_start_time = time.time()
 
@@ -295,7 +297,7 @@ class LiveProcessor(VideoProcessorBase):
             display_img = img.copy()
             h_f, w_f = img.shape[:2]
             
-            # [V118] 視窗比例加大至 70%
+            # [V118] 視窗比例 70%
             roi_w = int(w_f * 0.7)
             roi_h = int(h_f * 0.7)
             roi_x = (w_f - roi_w) // 2
@@ -344,6 +346,26 @@ class LiveProcessor(VideoProcessorBase):
             merged_boxes.sort(key=lambda b: b[0])
             self.cached_rois = []
             
+            # [V119] 防手震邏輯核心
+            # 1. 計算當前所有框框的中心點
+            current_centers = []
+            for (x, y, w, h) in merged_boxes:
+                current_centers.append((x + w//2, y + h//2))
+            
+            # 2. 計算總移動量
+            total_movement = 0
+            if len(current_centers) != len(self.last_centers):
+                # 數量變了 -> 代表正在移動或是對焦不穩 -> 強制重置
+                total_movement = 9999 
+            else:
+                # 數量一樣 -> 計算每個點位移了多少
+                for i in range(len(current_centers)):
+                    dx = abs(current_centers[i][0] - self.last_centers[i][0])
+                    dy = abs(current_centers[i][1] - self.last_centers[i][1])
+                    total_movement += (dx + dy)
+            
+            self.last_centers = current_centers # 更新上一幀紀錄
+
             detected_something = False
             for (x, y, w, h) in merged_boxes:
                 pad = self.erosion * 2
@@ -351,7 +373,6 @@ class LiveProcessor(VideoProcessorBase):
                                max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
                 
                 if roi.size == 0: continue
-                
                 if not check_complexity(roi): continue
 
                 final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf, self.strict_mode)
@@ -369,32 +390,32 @@ class LiveProcessor(VideoProcessorBase):
                     self.cached_rois.append((rx, ry, w, h, "?", box_color, True))
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 1)
 
-            if detected_something:
+            # [V119] 只有在「有抓到東西」且「移動量很小」時才計時
+            is_stable = (detected_something and total_movement < MOVEMENT_THRESHOLD)
+
+            if is_stable:
                 if self.stability_start_time is None:
                     self.stability_start_time = current_time
             else:
-                self.stability_start_time = None
+                self.stability_start_time = None # 只要一動，時間就歸零
                 
-            # [V118] 進度條置底邏輯
+            # 進度條繪製
             if self.stability_start_time is not None and not is_warming_up:
                 elapsed = current_time - self.stability_start_time
                 progress = min(elapsed / STABILITY_DURATION, 1.0)
                 
                 bar_h = 20
-                bar_y = h_f - bar_h # 貼底
+                bar_y = h_f - bar_h 
                 bar_x = 0
                 bar_w = w_f
                 
-                # 背景
                 cv2.rectangle(display_img, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (30, 30, 30), -1)
                 
-                # 進度
                 fill_w = int(bar_w * progress)
                 bar_color = (0, 255, 255)
                 if progress >= 1.0: bar_color = (0, 255, 0)
                 cv2.rectangle(display_img, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), bar_color, -1)
                 
-                # 文字提示 (放在 bar 上方)
                 status_text = "Scanning..." if progress < 1.0 else "Captured!"
                 cv2.putText(display_img, status_text, (10, bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, bar_color, 2)
                 
@@ -411,7 +432,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v118-cam", 
+            key="v119-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
