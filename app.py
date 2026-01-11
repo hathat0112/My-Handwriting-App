@@ -488,13 +488,27 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
 
     with st.expander("📖 操作指南 (How to use)"):
         st.markdown("""
-        <div class="manual-box">
-            <div class="manual-title">✍️ 手寫板模式使用技巧</div>
-            <div class="manual-text">
-            1. <b>工具選擇</b>：使用左上角的「✏️ 畫筆」或「🧽 橡皮擦」。<br>
-            2. <b>即時辨識</b>：在黑色畫布上書寫數字，右側會即時顯示結果。<br>
-            3. <b>智慧過濾</b>：此模式開啟了<b>嚴格過濾</b>，會自動忽略笑臉、塗鴉等非數字圖形。<br>
-            4. <b>清除重寫</b>：點擊「🗑️ 清空」可清除整個畫布。
+       <div class="manual-box">
+            <div class="manual-section">
+                <div class="manual-title">🖼️ 1. 拍攝距離與構圖技巧</div>
+                <div class="manual-text">
+                    • <b>拉近距離</b>：拍攝時請儘量讓數字填滿畫面，過小的字跡會降低 AI 的信心度。<br>
+                    • <b>保持垂直</b>：請將鏡頭正對紙張拍攝，避免因角度傾斜導致數字變形而無法辨認。
+                </div>
+            </div>
+            <div class="manual-section">
+                <div class="manual-title">💡 2. 光線環境與系統優化</div>
+                <div class="manual-text">
+                    • <b>均衡光線</b>：在明亮且均勻的環境下拍攝最佳；請避開強烈的手部或手機陰影。<br>
+                    • <b>寬容模式</b>：上傳模式已解除嚴格限制，即便是稍微模糊或光影不均的照片，系統也會盡力掃描。
+                </div>
+            </div>
+            <div class="manual-section">
+                <div class="manual-title">⚙️ 3. 遇到辨識不如預期時...</div>
+                <div class="manual-text">
+                    • <b>數字相黏？</b>：請嘗試調高左側選單的 <b>Erosion (切割沾黏)</b>。<br>
+                    • <b>數字漏抓？</b>：請調低左側的 <b>Confidence (信心門檻)</b>，讓系統顯示更多可能的偵測結果。
+                </div>
             </div>
         </div>
         """, unsafe_allow_html=True)
