@@ -19,12 +19,14 @@ from sklearn.svm import SVC
 st.set_page_config(page_title="Handwriting AI", page_icon="✒️", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-# 全域參數設定 (來自 app.py 的穩定設定)
-STABILITY_DURATION = 2.0  # 穩定時間 (秒)
-MOVEMENT_THRESHOLD = 100  # 移動容忍值
-ROI_MARGIN_X = 60         # 鏡頭 X 邊距
-ROI_MARGIN_Y = 60         # 鏡頭 Y 邊距
-SHRINK_PX = 4             # 繪圖內縮
+# [V86 鏡頭參數調校]
+# 降低穩定時間需求，提高反應速度
+STABILITY_DURATION = 0.8  
+# 大幅提高移動容忍值，手抖也不怕
+MOVEMENT_THRESHOLD = 150  
+ROI_MARGIN_X = 60         
+ROI_MARGIN_Y = 60         
+SHRINK_PX = 4             
 
 st.markdown("""
 <style>
@@ -72,7 +74,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 共用核心 (保留 app(2).py 的 V79/V83 邏輯)
+# 1. 共用核心 (V79/V83 邏輯保持不變)
 # ==========================================
 @st.cache_resource
 def load_models():
@@ -197,7 +199,7 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (已替換為慢速穩定版)
+# 2. 鏡頭模式 (V86 極速追焦)
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -206,16 +208,19 @@ class LiveProcessor(VideoProcessorBase):
         self.dilation = 2
         self.min_conf = 0.5
         
-        # 穩定度與效能變數
+        # 穩定度相關
         self.last_boxes = []
         self.stability_start_time = None
         self.frozen = False
         self.frozen_frame = None
         self.frame_counter = 0
-        self.skip_rate = 12  # 每 12 幀處理一次 (變慢)
+        
+        # [V86 關鍵修正]
+        # 跳幀率改為 3 (每秒約偵測 10 次，視覺上很流暢)
+        self.skip_rate = 3  
         self.cached_rois = []
         self.session_start_time = time.time()
-        self.warmup_duration = 1.5
+        self.warmup_duration = 1.0 # 暖身時間縮短
 
     def update_params(self, ero, dil, conf):
         self.erosion = ero
@@ -232,7 +237,7 @@ class LiveProcessor(VideoProcessorBase):
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         
-        # 暖身檢查
+        # 暖身
         if not hasattr(self, 'session_start_time') or self.session_start_time is None:
             self.session_start_time = time.time()
         is_warming_up = (time.time() - self.session_start_time) < self.warmup_duration
@@ -243,12 +248,13 @@ class LiveProcessor(VideoProcessorBase):
         display_img = img.copy()
         h_f, w_f = img.shape[:2]
         
-        # ROI 框
         roi_rect = [ROI_MARGIN_X, ROI_MARGIN_Y, w_f - 2*ROI_MARGIN_X, h_f - 2*ROI_MARGIN_Y]
         roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
         cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 2)
 
         self.frame_counter += 1
+        
+        # 跳幀邏輯
         if not (self.frame_counter % self.skip_rate == 0):
             if len(self.cached_rois) > 0:
                 for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
@@ -258,7 +264,7 @@ class LiveProcessor(VideoProcessorBase):
                 cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
             return av.VideoFrame.from_ndarray(display_img, format="bgr24")
         
-        # 影像處理 (使用 V79/V83 的邏輯)
+        # 影像處理
         roi_img = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
         if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
@@ -276,7 +282,6 @@ class LiveProcessor(VideoProcessorBase):
             x, y, w, h = cv2.boundingRect(c)
             if x<5 or y<5: continue
             valid_boxes.append((x,y,w,h))
-            # 轉換為絕對座標以供穩定性計算
             raw_boxes_for_stability.append({'box': (x+roi_rect[0], y+roi_rect[1], w, h)})
         
         valid_boxes.sort(key=lambda b: b[0])
@@ -287,26 +292,20 @@ class LiveProcessor(VideoProcessorBase):
         
         for (x, y, w, h) in valid_boxes:
             roi = binary_proc[y:y+h, x:x+w]
-            
-            # 使用我們強大的 V83 ensemble_predict
             final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
             
             if final_conf > self.min_conf:
                 detected_something = True
-                
-                # 轉回全圖座標繪製
                 rx, ry = x + roi_rect[0], y + roi_rect[1]
-                
                 box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
                 
-                # 繪製與快取
                 cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
                 txt = f"#{count_id}"
                 draw_label(display_img, txt, rx, ry)
                 self.cached_rois.append((rx, ry, w, h, txt, box_color))
                 count_id += 1
 
-        # 穩定度檢查邏輯
+        # 穩定度與抓拍邏輯 (V86 修正版)
         if len(raw_boxes_for_stability) == 0:
             self.stability_start_time = None
         elif len(self.last_boxes) == 0:
@@ -314,6 +313,7 @@ class LiveProcessor(VideoProcessorBase):
             self.stability_start_time = time.time()
         else:
             total_movement = 0
+            # 簡易計算移動量
             for curr_box in raw_boxes_for_stability:
                 c_x, c_y, _, _ = curr_box["box"]
                 min_dist = 99999
@@ -321,18 +321,20 @@ class LiveProcessor(VideoProcessorBase):
                     l_x, l_y, _, _ = last_box["box"]
                     dist = abs(c_x - l_x) + abs(c_y - l_y)
                     if dist < min_dist: min_dist = dist
-                if min_dist < 30: total_movement += min_dist
-                else: total_movement += 20 
+                if min_dist < 50: total_movement += min_dist # 門檻放寬
+                else: total_movement += 30 
             
             count_diff = abs(len(raw_boxes_for_stability) - len(self.last_boxes))
-            total_movement += count_diff * 30 
+            total_movement += count_diff * 50 
             self.last_boxes = raw_boxes_for_stability
 
+            # 若移動量小且非暖身中 -> 開始集氣
             if total_movement < MOVEMENT_THRESHOLD and not is_warming_up:
                 if self.stability_start_time is None: self.stability_start_time = time.time()
                 elapsed = time.time() - self.stability_start_time
                 progress = min(elapsed / STABILITY_DURATION, 1.0)
                 
+                # 藍色進度條
                 bar_y = h_f - 20 
                 bar_w = int(600 * progress)
                 color = (0, 255, 255) if progress < 1.0 else (0, 255, 0)
@@ -343,7 +345,7 @@ class LiveProcessor(VideoProcessorBase):
                     self.frozen = True
                     self.frozen_frame = display_img.copy()
             else:
-                self.stability_start_time = time.time()
+                self.stability_start_time = time.time() # 重置計時
                 if is_warming_up: 
                     cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
@@ -462,7 +464,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (V83 邏輯)
+# 4. 上傳模式 (V83 邏輯 - 變數修復)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     
@@ -480,6 +482,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
         img_origin = cv2.imdecode(file_bytes, 1)
         
+        # [變數命名修正] 避免衝突
         img_h, img_w = img_origin.shape[:2]
         
         if img_w > 1000:
@@ -489,6 +492,7 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
+        # BlackHat 核心
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
@@ -503,11 +507,12 @@ def run_upload_mode(erosion, dilation, min_conf):
         valid_boxes_data = []
         for c in cnts:
             area = cv2.contourArea(c)
-            if area < 80: continue 
+            if area < 80: continue # 寬鬆門檻
             
             x, y, w, h = cv2.boundingRect(c)
             if w < 10 and h < 10: continue
             
+            # [邏輯修正]
             if w * h > (img_h * img_w * 0.9): continue
             
             roi = processed[y:y+h, x:x+w]
@@ -551,6 +556,7 @@ def main():
     st.title("HANDWRITING AI")
     
     st.sidebar.header("Settings")
+    # 預設手寫板 (index=1)
     mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
     
     st.sidebar.divider()
