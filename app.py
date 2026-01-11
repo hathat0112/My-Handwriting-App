@@ -540,7 +540,6 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 
                 if roi.size == 0: continue
                 
-                # 手寫板模式不使用嚴格過濾
                 if not check_complexity(roi): continue
 
                 final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False)
@@ -623,7 +622,7 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             
             if not check_complexity(roi): continue
 
-            # 上傳模式強制關閉嚴格模式，確保陰影下的數字能顯示
+            # [V120] 上傳模式強制關閉嚴格模式，確保陰影下的數字能顯示
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False)
             
             if final_lbl != -1 and final_conf > min_conf:
