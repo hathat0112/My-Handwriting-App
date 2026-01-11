@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V117)", 
+    page_title="Handwriting AI (V118)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -295,9 +295,9 @@ class LiveProcessor(VideoProcessorBase):
             display_img = img.copy()
             h_f, w_f = img.shape[:2]
             
-            # [V117] 動態 ROI：不管畫面多大，都取中間 60%
-            roi_w = int(w_f * 0.6)
-            roi_h = int(h_f * 0.6)
+            # [V118] 視窗比例加大至 70%
+            roi_w = int(w_f * 0.7)
+            roi_h = int(h_f * 0.7)
             roi_x = (w_f - roi_w) // 2
             roi_y = (h_f - roi_h) // 2
             
@@ -375,20 +375,29 @@ class LiveProcessor(VideoProcessorBase):
             else:
                 self.stability_start_time = None
                 
+            # [V118] 進度條置底邏輯
             if self.stability_start_time is not None and not is_warming_up:
                 elapsed = current_time - self.stability_start_time
                 progress = min(elapsed / STABILITY_DURATION, 1.0)
-                bar_x = roi_rect[0]
-                bar_y = roi_rect[1] + roi_rect[3] + 20
-                bar_w = roi_rect[2]
-                bar_h = 15
-                cv2.rectangle(display_img, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (50, 50, 50), -1)
+                
+                bar_h = 20
+                bar_y = h_f - bar_h # 貼底
+                bar_x = 0
+                bar_w = w_f
+                
+                # 背景
+                cv2.rectangle(display_img, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (30, 30, 30), -1)
+                
+                # 進度
                 fill_w = int(bar_w * progress)
                 bar_color = (0, 255, 255)
                 if progress >= 1.0: bar_color = (0, 255, 0)
                 cv2.rectangle(display_img, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), bar_color, -1)
+                
+                # 文字提示 (放在 bar 上方)
                 status_text = "Scanning..." if progress < 1.0 else "Captured!"
-                cv2.putText(display_img, status_text, (bar_x, bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, bar_color, 2)
+                cv2.putText(display_img, status_text, (10, bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, bar_color, 2)
+                
                 if progress >= 1.0 and len(self.cached_rois) > 0:
                     self.frozen = True
                     self.frozen_frame = display_img.copy()
@@ -402,7 +411,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v117-cam", 
+            key="v118-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
