@@ -1,32 +1,25 @@
 import streamlit as st
+
+# ==========================================
+# 0. 頁面設定 (必須是第一個 Streamlit 指令！)
+# ==========================================
+st.set_page_config(page_title="Handwriting AI (V90)", page_icon="✒️", layout="wide")
+
 import cv2
 import numpy as np
 import os
 import time
 import av
 import joblib
-import sys
-import traceback
+from streamlit_drawable_canvas import st_canvas
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+from streamlit_image_coordinates import streamlit_image_coordinates
+from tensorflow.keras.models import load_model
+from tensorflow.keras.datasets import mnist
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
 
-# -----------------------------------------------------------------------------
-# 0. 錯誤捕捉啟動 (放在最前面，防止崩潰直接白屏)
-# -----------------------------------------------------------------------------
-try:
-    from streamlit_drawable_canvas import st_canvas
-    from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
-    from streamlit_image_coordinates import streamlit_image_coordinates
-    from tensorflow.keras.models import load_model
-    from tensorflow.keras.datasets import mnist
-    from sklearn.neighbors import KNeighborsClassifier
-    from sklearn.svm import SVC
-except ImportError as e:
-    st.error(f"❌ 缺少套件，請檢查安裝: {e}")
-    st.stop()
-
-# ==========================================
-# 1. 頁面設定 & 極簡 CSS
-# ==========================================
-st.set_page_config(page_title="Handwriting AI (V89)", page_icon="✒️", layout="wide")
+# 環境變數設定
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # [V87 舒適對焦參數]
@@ -83,7 +76,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 共用核心 (V79/V83/V88 邏輯)
+# 1. 共用核心
 # ==========================================
 @st.cache_resource
 def load_models():
@@ -133,11 +126,10 @@ def load_models():
         
     return cnn, knn, svm
 
-# 嘗試載入模型，失敗不崩潰
 try:
     cnn_model, knn_model, svm_model = load_models()
 except Exception as e:
-    st.error(f"❌ 模型載入失敗: {e}")
+    st.error(f"❌ 模型載入失敗，請檢查終端機錯誤訊息。")
     st.stop()
 
 def v65_morphology(binary_img, erosion, dilation):
@@ -180,7 +172,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [V88] 權威仲裁預測
+# [V88] 權威仲裁預測 (1 vs 2 修正)
 def ensemble_predict(roi, min_conf):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -202,7 +194,7 @@ def ensemble_predict(roi, min_conf):
     final_conf = conf_cnn
     details = ""
     
-    # V88 權威修正：若 CNN 判 1 但其他人判 2，強制聽 CNN
+    # 修正邏輯：若 CNN 判斷為 1，但其他判斷為 2，聽 CNN 的
     if final_lbl == 2 and lbl_cnn == 1:
         final_lbl = 1
         details = " (CNN修正)"
@@ -219,7 +211,7 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 3. 鏡頭模式 (V87 舒適對焦)
+# 2. 鏡頭模式 (V87 舒適對焦)
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -363,7 +355,6 @@ class LiveProcessor(VideoProcessorBase):
 
             return av.VideoFrame.from_ndarray(display_img, format="bgr24")
         except Exception as e:
-            print(f"Frame Error: {e}")
             return av.VideoFrame.from_ndarray(frame.to_ndarray(format="bgr24"), format="bgr24")
 
 def run_camera_mode(erosion, dilation, min_conf):
@@ -390,7 +381,7 @@ def run_camera_mode(erosion, dilation, min_conf):
                 st.info("⏳ 偵測中...")
 
 # ==========================================
-# 4. 手寫板模式
+# 3. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
@@ -479,7 +470,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 5. 上傳模式 (V83 邏輯 + V88 預測)
+# 4. 上傳模式 (V83 邏輯 + V88 預測)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     
@@ -563,12 +554,10 @@ def run_upload_mode(erosion, dilation, min_conf):
                 st.image(processed, use_container_width=True, caption="BlackHat Vision")
 
 # ==========================================
-# 6. 主程式分流 (全域 Try-Catch)
+# 5. 主程式分流
 # ==========================================
 def main():
     try:
-        st.title("HANDWRITING AI")
-        
         st.sidebar.header("Settings")
         mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
         
@@ -589,7 +578,7 @@ def main():
             min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字")
 
         if cnn_model is None:
-            st.error("❌ Model not found! 請確保 mnist_cnn.h5 存在")
+            st.error("Model not found! 請確保 mnist_cnn.h5 存在")
             st.stop()
 
         if mode == "📷 鏡頭 (Live)":
@@ -600,8 +589,7 @@ def main():
             run_upload_mode(erosion_iter, dilation_iter, min_conf)
             
     except Exception as e:
-        st.error("🔥 發生非預期錯誤，請截圖給開發者：")
-        st.exception(e)
+        st.error(f"程式執行發生錯誤: {e}")
 
 if __name__ == "__main__":
     main()
