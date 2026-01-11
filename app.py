@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V102)", 
+    page_title="Handwriting AI (V105)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -24,7 +24,6 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
-# 環境變數
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # 參數設定
@@ -34,12 +33,10 @@ ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
-# WebRTC 設定
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
-# CSS 修飾
 st.markdown("""
 <style>
     header[data-testid="stHeader"] {background-color: transparent; z-index: 999;}
@@ -120,16 +117,73 @@ except Exception as e:
     st.error(f"❌ 模型載入失敗: {e}")
     st.stop()
 
+# [V105 改良] 形態學處理：只做閉運算和膨脹，不做腐蝕，避免筆畫斷裂
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
-    if erosion > 0:
-        kernel = np.ones((3,3), np.uint8)
-        res = cv2.erode(res, kernel, iterations=erosion)
+    
+    # 閉運算：連接斷掉的線條
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=2)
-    if dilation > 0:
-        res = cv2.dilate(res, None, iterations=dilation)
+    
+    # 膨脹：讓筆畫變粗 (V105 強制至少做一次膨脹)
+    iter_dil = max(1, dilation)
+    kernel_dil = np.ones((3,3), np.uint8)
+    res = cv2.dilate(res, kernel_dil, iterations=iter_dil)
+        
     return res
+
+# [V105 新增] 方框合併演算法：解決筆畫破碎問題
+def merge_nearby_boxes(boxes, distance_threshold=20):
+    if not boxes: return []
+    
+    # 格式化為 [x1, y1, x2, y2]
+    rects = []
+    for (x, y, w, h) in boxes:
+        rects.append([x, y, x+w, y+h])
+    rects = np.array(rects)
+    
+    while True:
+        merged = False
+        new_rects = []
+        used = [False] * len(rects)
+        
+        for i in range(len(rects)):
+            if used[i]: continue
+            
+            current_rect = rects[i]
+            x1, y1, x2, y2 = current_rect
+            
+            # 尋找可以合併的框
+            for j in range(i + 1, len(rects)):
+                if used[j]: continue
+                
+                ox1, oy1, ox2, oy2 = rects[j]
+                
+                # 計算距離
+                dist_x = max(0, x1 - ox2) + max(0, ox1 - x2)
+                dist_y = max(0, y1 - oy2) + max(0, oy1 - y2)
+                
+                # 如果距離夠近，合併它們
+                if dist_x < distance_threshold and dist_y < distance_threshold:
+                    x1 = min(x1, ox1)
+                    y1 = min(y1, oy1)
+                    x2 = max(x2, ox2)
+                    y2 = max(y2, oy2)
+                    used[j] = True
+                    merged = True
+            
+            new_rects.append([x1, y1, x2, y2])
+            
+        if not merged:
+            break
+        rects = np.array(new_rects)
+
+    # 轉回 [x, y, w, h] 格式
+    final_boxes = []
+    for (x1, y1, x2, y2) in rects:
+        final_boxes.append((x1, y1, x2-x1, y2-y1))
+        
+    return final_boxes
 
 def center_by_moments(img):
     m = cv2.moments(img, True)
@@ -154,13 +208,12 @@ def preprocess_input(roi):
 
 def draw_label(img, text, x, y, color=(0, 255, 255)):
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 1.0 # 字體大小適中
+    scale = 1.0
     thickness = 2
     (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [CNN 優先邏輯]
 def ensemble_predict(roi, min_conf):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -183,7 +236,11 @@ def ensemble_predict(roi, min_conf):
     if agree_count == 2:
         final_conf = min(0.99, final_conf + 0.05)
     else:
-        final_conf = max(0.0, final_conf - 0.15)
+        if conf_cnn > 0.85:
+            final_conf = conf_cnn
+        else:
+            final_conf = max(0.0, final_conf - 0.15)
+            
         disagreements = []
         if knn_model and lbl_knn != lbl_cnn: disagreements.append(f"K:{lbl_knn}")
         if svm_model and lbl_svm != lbl_cnn: disagreements.append(f"S:{lbl_svm}")
@@ -192,14 +249,14 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (V102: 強制降低解析度)
+# 2. 鏡頭模式
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
         self.model = cnn_model
         self.erosion = 0
-        self.dilation = 2
-        self.min_conf = 0.5
+        self.dilation = 2 
+        self.min_conf = 0.50 
         
         self.last_boxes = []
         self.stability_start_time = None
@@ -244,7 +301,6 @@ class LiveProcessor(VideoProcessorBase):
             roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
             cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 2)
 
-            # 時間閥門：使用快取結果
             if (current_time - self.last_process_time) < self.process_interval:
                 if len(self.cached_rois) > 0:
                     for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
@@ -260,26 +316,35 @@ class LiveProcessor(VideoProcessorBase):
             if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
             gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
-            blur = cv2.GaussianBlur(gray, (3, 3), 0) 
+            blur = cv2.GaussianBlur(gray, (5, 5), 0) 
             binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
             binary_proc = v65_morphology(binary, self.erosion, self.dilation)
             
             cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            valid_boxes = []
-            raw_boxes_for_stability = []
             
+            raw_boxes = []
             for c in cnts:
-                if cv2.contourArea(c) < 300: continue
+                area = cv2.contourArea(c)
+                if area < 150: continue 
                 x, y, w, h = cv2.boundingRect(c)
                 if x<5 or y<5: continue
-                valid_boxes.append((x,y,w,h))
-                raw_boxes_for_stability.append({'box': (x+roi_rect[0], y+roi_rect[1], w, h)})
+                
+                # 形狀過濾
+                aspect_ratio = w / float(h)
+                if aspect_ratio > 1.5: continue 
+                if h < 15: continue
+                if x < 10: continue 
+                
+                raw_boxes.append((x,y,w,h))
             
-            valid_boxes.sort(key=lambda b: b[0])
+            # [V105] 合併重疊或過近的框
+            merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=20)
+            merged_boxes.sort(key=lambda b: b[0])
+            
             self.cached_rois = []
             detected_something = False
             
-            for (x, y, w, h) in valid_boxes:
+            for (x, y, w, h) in merged_boxes:
                 roi = binary_proc[y:y+h, x:x+w]
                 final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
                 
@@ -289,50 +354,12 @@ class LiveProcessor(VideoProcessorBase):
                     box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
                     
                     txt = str(final_lbl) 
-                    
                     self.cached_rois.append((rx, ry, w, h, txt, box_color))
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
                     draw_label(display_img, txt, rx, ry)
 
-            if len(raw_boxes_for_stability) == 0:
-                self.stability_start_time = None
-            elif len(self.last_boxes) == 0:
-                self.last_boxes = raw_boxes_for_stability
-                self.stability_start_time = time.time()
-            else:
-                total_movement = 0
-                for curr_box in raw_boxes_for_stability:
-                    c_x, c_y, _, _ = curr_box["box"]
-                    min_dist = 99999
-                    for last_box in self.last_boxes:
-                        l_x, l_y, _, _ = last_box["box"]
-                        dist = abs(c_x - l_x) + abs(c_y - l_y)
-                        if dist < min_dist: min_dist = dist
-                    if min_dist < 50: total_movement += min_dist
-                    else: total_movement += 30 
-                
-                count_diff = abs(len(raw_boxes_for_stability) - len(self.last_boxes))
-                total_movement += count_diff * 50 
-                self.last_boxes = raw_boxes_for_stability
-
-                if total_movement < MOVEMENT_THRESHOLD and not is_warming_up:
-                    if self.stability_start_time is None: self.stability_start_time = time.time()
-                    elapsed = time.time() - self.stability_start_time
-                    progress = min(elapsed / STABILITY_DURATION, 1.0)
-                    
-                    bar_y = h_f - 20 
-                    bar_w = int(600 * progress)
-                    color = (0, 255, 255) if progress < 1.0 else (0, 255, 0)
-                    cv2.rectangle(display_img, (20, bar_y - 15), (20 + bar_w, bar_y), color, -1)
-                    cv2.rectangle(display_img, (20, bar_y - 15), (w_f - 20, bar_y), (255, 255, 255), 2)
-                    
-                    if elapsed >= STABILITY_DURATION and detected_something:
-                        self.frozen = True
-                        self.frozen_frame = display_img.copy()
-                else:
-                    self.stability_start_time = time.time()
-                    if is_warming_up: 
-                        cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            if len(self.cached_rois) > 0:
+                self.stability_start_time = time.time() 
 
             return av.VideoFrame.from_ndarray(display_img, format="bgr24")
         except Exception as e:
@@ -343,12 +370,11 @@ def run_camera_mode(erosion, dilation, min_conf):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v102-cam", 
+            key="v105-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
             async_processing=True,
-            # [V102 關鍵] 強制瀏覽器使用低解析度，大幅降低延遲
             media_stream_constraints={
                 "video": {
                     "width": {"min": 480, "ideal": 480, "max": 640},
@@ -417,24 +443,25 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            merge_kernel = np.ones((4, 4), np.uint8) 
-            merged_mask = cv2.dilate(processed, merge_kernel, iterations=2)
-            cnts, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            valid_boxes = []
+            raw_boxes = []
             for c in cnts:
                 area = cv2.contourArea(c)
                 if area < 150: continue 
                 x, y, w, h = cv2.boundingRect(c)
                 if h < 15 or w < 5: continue 
-                valid_boxes.append((x,y,w,h))
+                raw_boxes.append((x,y,w,h))
             
-            boxes = sorted(valid_boxes, key=lambda b: b[0])
+            # 合併框
+            merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=30)
+            merged_boxes.sort(key=lambda b: b[0])
+            
             draw_img = img_bgr.copy()
             results_list = []
             valid_count = 1
             
-            for i, (x, y, w, h) in enumerate(boxes):
+            for i, (x, y, w, h) in enumerate(merged_boxes):
                 roi = processed[y:y+h, x:x+w]
                 final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
                 
@@ -456,7 +483,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (V98: 邊緣過濾)
+# 4. 上傳模式 (V105: 邊緣過濾 + 方框合併)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     file = st.file_uploader("Drop an image here", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
@@ -481,19 +508,17 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # BlackHat 運算
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
         _, binary = cv2.threshold(blackhat_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
-        kernel_link = np.ones((3,3), np.uint8)
-        processed = cv2.dilate(binary, kernel_link, iterations=1)
-        if dilation > 0: processed = cv2.dilate(processed, None, iterations=dilation)
+        # [V105] 上傳模式：使用強化的形態學處理
+        processed = v65_morphology(binary, erosion, dilation)
         
         cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        valid_boxes_data = []
+        raw_boxes = []
         for c in cnts:
             area = cv2.contourArea(c)
             if area < 80: continue 
@@ -501,16 +526,22 @@ def run_upload_mode(erosion, dilation, min_conf):
             if w < 10 and h < 10: continue
             if w * h > (img_h * img_w * 0.9): continue
             
-            if y + h > img_h - 10: 
-                continue 
-
+            # 邊緣過濾
+            if y + h > img_h - 10: continue 
+            
+            raw_boxes.append((x,y,w,h))
+            
+        # [V105] 合併碎裂的框框
+        merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=25)
+        merged_boxes.sort(key=lambda item: (item[1]//50, item[0]))
+        
+        valid_boxes_data = []
+        for (x, y, w, h) in merged_boxes:
             roi = processed[y:y+h, x:x+w]
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
             if final_conf > min_conf:
                 valid_boxes_data.append({'rect': (x,y,w,h), 'lbl': final_lbl, 'conf': final_conf, 'details': details})
 
-        valid_boxes_data.sort(key=lambda item: (item['rect'][1]//50, item['rect'][0]))
-        
         c1, c2 = st.columns([1.5, 1], gap="large")
         with c1:
             display_img = img_origin.copy()
@@ -580,8 +611,8 @@ def main():
                 """, unsafe_allow_html=True)
                 
                 erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0, help="把線條變細，用來分開黏在一起的字")
-                dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2, help="把線條變粗，用來連接斷掉的筆畫")
-                min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字")
+                dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2, help="把線條變粗，用來連接斷掉的筆畫") # 回歸 2 (平衡)
+                min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字") # 回歸 0.50 (平衡)
             
             if st.sidebar.button("🏠 回到首頁"):
                 st.session_state['page'] = 'welcome'
