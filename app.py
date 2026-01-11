@@ -1,5 +1,5 @@
 import streamlit as st
-import pandas as pd # 新增 pandas 用於圖表
+import pandas as pd  # 新增: 用於圖表
 import cv2
 import numpy as np
 import os
@@ -13,27 +13,31 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 # ==========================================
-# 0. 頁面設定 (開發者風格)
+# 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="AI Model Lab (Dev Tool)", 
+    page_title="Handwriting AI (Dev Lab)", 
     page_icon="🛠️", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
-# CSS: 讓介面看起來更像儀表板
+# CSS 修飾 (保留原版風格，並增加儀表板樣式)
 st.markdown("""
 <style>
-    .stApp {background-color: #0e1117;}
-    .reportview-container {background: #0e1117;}
-    .sidebar .sidebar-content {background: #262730;}
-    h1, h2, h3 {font-family: 'Courier New', monospace;}
-    .metric-card {background-color: #1f2937; padding: 15px; border-radius: 8px; border: 1px solid #374151;}
-    .stDataFrame {border: 1px solid #374151;}
+    header[data-testid="stHeader"] {background-color: transparent; z-index: 999;}
+    .stButton>button {
+        background-color: #4a4a4a !important; color: white !important; border: none; transition: all 0.3s ease;
+    }
+    .stButton>button:hover {background-color: #FF4B4B !important; transform: scale(1.02);}
+    .welcome-container {text-align: center; padding: 50px; border-radius: 15px; background: rgba(128, 128, 128, 0.1); margin-top: 50px;}
+    .welcome-title {font-size: 3rem; font-weight: 700; margin-bottom: 1rem;}
+    
+    /* 儀表板樣式 */
+    .dashboard-card {background-color: #262730; padding: 10px; border-radius: 5px; border: 1px solid #444; margin-bottom: 10px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -42,10 +46,10 @@ st.markdown("""
 # ==========================================
 @st.cache_resource
 def load_models():
-    # 載入 CNN
+    # 1. CNN
     cnn = None
     if os.path.exists("mnist_cnn.h5"):
-        try: cnn = load_model("mnist_cnn.h5")
+        try: cnn = load_model("mnist_cnn.h5"); print("CNN Loaded")
         except: pass
     
     # 準備訓練資料給 KNN/SVM
@@ -53,32 +57,23 @@ def load_models():
     y_train = None
     try:
         (x_raw, y_raw), _ = mnist.load_data()
-        x_flat = x_raw.reshape(-1, 784)[:5000] / 255.0 # 僅用 5000 筆加速
+        # 僅用 5000 筆加速啟動
+        x_flat = x_raw.reshape(-1, 784)[:5000] / 255.0
         y_train = y_raw[:5000]
     except: pass
 
-    # 載入或訓練 KNN
+    # 2. KNN
     knn = None
-    knn_path = "knn_model.pkl"
-    if os.path.exists(knn_path):
-        try: knn = joblib.load(knn_path)
-        except: pass
-    if knn is None and x_flat is not None:
+    if x_flat is not None:
         knn = KNeighborsClassifier(n_neighbors=3)
         knn.fit(x_flat, y_train)
-        # joblib.dump(knn, knn_path) # 開發版不強制存檔
 
-    # 載入或訓練 SVM
+    # 3. SVM
     svm = None
-    svm_path = "svm_model.pkl"
-    if os.path.exists(svm_path):
-        try: svm = joblib.load(svm_path)
-        except: pass
-    if svm is None and x_flat is not None:
+    if x_flat is not None:
         svm = SVC(kernel='rbf', probability=True)
         svm.fit(x_flat, y_train)
-        # joblib.dump(svm, svm_path)
-
+        
     return cnn, knn, svm
 
 try:
@@ -88,64 +83,12 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 2. 核心分析函式 (Deep Analysis)
+# 2. 核心影像處理與預測
 # ==========================================
-def preprocess_for_analysis(roi):
-    """將圖片轉為 28x28 並進行標準化，保留原始特徵供檢視"""
-    h, w = roi.shape
-    # 保持長寬比縮放
-    scale = 20.0 / max(h, w)
-    nh, nw = max(1, int(h * scale)), max(1, int(w * scale))
-    resized = cv2.resize(roi, (nw, nh), interpolation=cv2.INTER_AREA)
-    
-    # 填補至 28x28
-    canvas = np.zeros((28, 28), dtype=np.uint8)
-    y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
-    canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
-    
-    # 重心置中 (Center by Moments) - 這是標準 MNIST 處理
-    m = cv2.moments(canvas, True)
-    if m['m00'] > 0.1:
-        cX, cY = m['m10'] / m['m00'], m['m01'] / m['m00']
-        tX, tY = 14.0 - cX, 14.0 - cY
-        M = np.float32([[1, 0, tX], [0, 1, tY]])
-        canvas = cv2.warpAffine(canvas, M, (28, 28), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        
-    cnn_in = canvas.reshape(1, 28, 28, 1).astype('float32') / 255.0
-    flat_in = canvas.reshape(1, 784).astype('float32') / 255.0
-    return cnn_in, flat_in, canvas
 
-def analyze_digit(roi):
-    """執行多模型分析，回傳詳細數據"""
-    cnn_in, flat_in, raw_img = preprocess_for_analysis(roi)
-    
-    # 1. CNN 預測 (含機率分佈)
-    pred_prob = cnn_model.predict(cnn_in, verbose=0)[0]
-    cnn_lbl = np.argmax(pred_prob)
-    cnn_conf = float(np.max(pred_prob))
-    
-    # 2. KNN 預測
-    knn_lbl = knn_model.predict(flat_in)[0] if knn_model else -1
-    
-    # 3. SVM 預測
-    svm_lbl = svm_model.predict(flat_in)[0] if svm_model else -1
-    
-    return {
-        "cnn_label": int(cnn_lbl),
-        "cnn_conf": cnn_conf,
-        "probs": pred_prob,
-        "knn_label": int(knn_lbl),
-        "svm_label": int(svm_lbl),
-        "raw_img": raw_img # 這是 28x28 的原始圖
-    }
-
-# ==========================================
-# 3. 輔助函式 (影像處理)
-# ==========================================
+# [新增] 靈活的二值化處理
 def get_binary_image(gray, method, block_size, c_val):
-    """根據開發者設定的參數進行二值化"""
     if method == "Adaptive Gaussian":
-        # Block size 必須是奇數
         if block_size % 2 == 0: block_size += 1
         return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block_size, c_val)
     elif method == "Otsu":
@@ -155,146 +98,402 @@ def get_binary_image(gray, method, block_size, c_val):
         _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV)
         return binary
 
-# ==========================================
-# 4. 上傳與實驗模式 (Lab Mode)
-# ==========================================
-def run_lab_mode(thresh_method, block_size, c_val, show_intermediate):
-    st.markdown("### 🧪 影像實驗室 (Image Lab)")
+# [修改] 預處理：回傳更多資訊 (Raw Image)
+def preprocess_input(roi):
+    h, w = roi.shape
+    scale = 20.0 / max(h, w)
+    nh, nw = max(1, int(h * scale)), max(1, int(w * scale))
+    resized = cv2.resize(roi, (nw, nh), interpolation=cv2.INTER_AREA)
     
-    file = st.file_uploader("上傳圖片進行深度分析", type=["jpg", "png", "jpeg"])
+    canvas = np.zeros((28, 28), dtype=np.uint8)
+    y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
+    canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
+    
+    # 重心置中
+    m = cv2.moments(canvas, True)
+    if m['m00'] > 0.1:
+        cX, cY = m['m10'] / m['m00'], m['m01'] / m['m00']
+        tX, tY = 14.0 - cX, 14.0 - cY
+        M = np.float32([[1, 0, tX], [0, 1, tY]])
+        canvas = cv2.warpAffine(canvas, M, (28, 28), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        
+    cnn_in = canvas.reshape(1, 28, 28, 1).astype('float32') / 255.0
+    flat_in = canvas.reshape(1, 784).astype('float32') / 255.0
+    
+    return cnn_in, flat_in, canvas # 多回傳 canvas (原圖)
+
+# [修改] 預測邏輯：回傳詳細字典 (Dict) 而非 Tuple
+def ensemble_predict_advanced(roi, min_conf):
+    cnn_in, flat_in, raw_img = preprocess_input(roi)
+    
+    # CNN 預測
+    pred_probs = cnn_model.predict(cnn_in, verbose=0)[0]
+    cnn_lbl = np.argmax(pred_probs)
+    cnn_conf = np.max(pred_probs)
+    
+    # KNN & SVM
+    knn_lbl = knn_model.predict(flat_in)[0] if knn_model else -1
+    svm_lbl = svm_model.predict(flat_in)[0] if svm_model else -1
+    
+    # 簡單投票邏輯 (用於 Live 模式快速判斷)
+    final_lbl = cnn_lbl
+    if cnn_conf < 0.8 and (knn_lbl == svm_lbl) and (knn_lbl != cnn_lbl):
+        final_lbl = knn_lbl
+    
+    return {
+        "final_label": int(final_lbl),
+        "conf": float(cnn_conf),
+        "probs": pred_probs, # 機率分佈
+        "preds": {"CNN": int(cnn_lbl), "KNN": int(knn_lbl), "SVM": int(svm_lbl)},
+        "raw_img": raw_img, # 28x28 像素圖
+        "models_agree": (cnn_lbl == knn_lbl == svm_lbl)
+    }
+
+# 輔助：判斷複雜度 (避免雜訊)
+def check_complexity(roi):
+    cnts, _ = cv2.findContours(roi, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    return len(cnts) > 0
+
+# 輔助：合併框
+def merge_nearby_boxes(boxes, distance_threshold=20):
+    if not boxes: return []
+    rects = np.array([[x, y, x+w, y+h] for (x, y, w, h) in boxes])
+    while True:
+        merged = False
+        new_rects = []
+        used = [False] * len(rects)
+        for i in range(len(rects)):
+            if used[i]: continue
+            x1, y1, x2, y2 = rects[i]
+            for j in range(i + 1, len(rects)):
+                if used[j]: continue
+                ox1, oy1, ox2, oy2 = rects[j]
+                if (max(0, x1-ox2)+max(0, ox1-x2) < distance_threshold) and (max(0, y1-oy2)+max(0, oy1-y2) < distance_threshold):
+                    x1, y1, x2, y2 = min(x1, ox1), min(y1, oy1), max(x2, ox2), max(y2, oy2)
+                    used[j] = True; merged = True
+            new_rects.append([x1, y1, x2, y2])
+        if not merged: break
+        rects = np.array(new_rects)
+    return [(x, y, x2-x, y2-y) for (x, y, x2, y2) in rects]
+
+# ==========================================
+# 3. 儀表板顯示組件 (Dashboard UI)
+# ==========================================
+def display_dashboard(results):
+    """將 Canvas 和 Upload 模式的結果以儀表板形式顯示"""
+    if not results:
+        st.info("尚未偵測到數字")
+        return
+
+    st.markdown("### 🔬 開發者分析儀表板 (Developer Dashboard)")
+    
+    for i, res in enumerate(results):
+        lbl = res['final_label']
+        conf = res['conf']
+        agree = res['models_agree']
+        icon = "🟢" if agree and conf > 0.8 else "🔴" if not agree else "⚠️"
+        
+        with st.expander(f"{icon} 數字 #{i+1}: 預測為 **{lbl}** (信心度 {int(conf*100)}%)", expanded=True):
+            c_img, c_table, c_chart = st.columns([1, 2, 3])
+            
+            # 1. 顯示 AI 看到的 28x28 原圖
+            with c_img:
+                st.caption("AI 看到的 (Raw Input)")
+                # 放大顯示以便觀察像素
+                big_img = cv2.resize(res['raw_img'], (150, 150), interpolation=cv2.INTER_NEAREST)
+                st.image(big_img, clamp=True, output_format="PNG")
+            
+            # 2. 模型競技場 (比較不同模型)
+            with c_table:
+                st.caption("模型投票 (Model Arena)")
+                df_vote = pd.DataFrame([res['preds']])
+                st.dataframe(df_vote, hide_index=True, use_container_width=True)
+                if not agree:
+                    st.error("⚠️ 模型意見分歧！")
+                else:
+                    st.success("✅ 模型意見一致")
+
+            # 3. 機率分佈圖
+            with c_chart:
+                st.caption("CNN 猶豫程度 (Probability)")
+                df_chart = pd.DataFrame({
+                    "Digit": range(10),
+                    "Prob": res['probs']
+                })
+                st.bar_chart(df_chart, x="Digit", y="Prob", height=150)
+
+# ==========================================
+# 4. 鏡頭模式 (Live)
+# ==========================================
+class LiveProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.params = {"method": "Adaptive Gaussian", "block": 15, "c": 10, "conf": 0.5, "erosion": 0}
+        self.last_results = []
+        
+    def update_params(self, new_params):
+        self.params = new_params
+
+    def recv(self, frame):
+        try:
+            img = frame.to_ndarray(format="bgr24")
+            display_img = img.copy()
+            
+            # 使用側邊欄設定的參數
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            binary = get_binary_image(gray, self.params['method'], self.params['block'], self.params['c'])
+            
+            # 形態學
+            if self.params['erosion'] > 0:
+                binary = cv2.erode(binary, np.ones((3,3), np.uint8), iterations=self.params['erosion'])
+            
+            # 抓輪廓
+            cnts, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            raw_boxes = []
+            for c in cnts:
+                if cv2.contourArea(c) < 100: continue
+                x, y, w, h = cv2.boundingRect(c)
+                if h < 20: continue
+                raw_boxes.append((x,y,w,h))
+                
+            merged = merge_nearby_boxes(raw_boxes)
+            
+            # 預測並繪圖
+            for (x, y, w, h) in merged:
+                pad = 10
+                # 邊界檢查
+                y1, y2 = max(0, y-pad), min(binary.shape[0], y+h+pad)
+                x1, x2 = max(0, x-pad), min(binary.shape[1], x+w+pad)
+                roi = binary[y1:y2, x1:x2]
+                
+                if roi.size == 0 or not check_complexity(roi): continue
+                
+                # 呼叫新的預測函式
+                res = ensemble_predict_advanced(roi, self.params['conf'])
+                
+                if res['conf'] > self.params['conf']:
+                    color = (0, 255, 0) if res['models_agree'] else (0, 165, 255)
+                    cv2.rectangle(display_img, (x, y), (x+w, y+h), color, 2)
+                    label = f"{res['final_label']} ({int(res['conf']*100)}%)"
+                    cv2.putText(display_img, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            
+            return av.VideoFrame.from_ndarray(display_img, format="bgr24")
+        except Exception as e:
+            print(f"Error: {e}")
+            return frame
+
+def run_camera_mode(params):
+    st.info("🎥 鏡頭模式：即時預覽參數調整的效果")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        ctx = webrtc_streamer(
+            key="dev-cam",
+            mode=WebRtcMode.SENDRECV,
+            rtc_configuration=RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}),
+            video_processor_factory=LiveProcessor,
+            async_processing=True,
+        )
+    with col2:
+        if ctx.video_processor:
+            ctx.video_processor.update_params(params)
+            st.success("✅ 參數已同步至鏡頭")
+        st.markdown("**說明：**\n鏡頭模式僅顯示簡化結果，若需詳細圖表分析，請使用手寫板或上傳模式。")
+
+# ==========================================
+# 5. 手寫板模式 (Canvas)
+# ==========================================
+def run_canvas_mode(params):
+    c1, c2 = st.columns([1.5, 2], gap="large")
+    
+    with c1:
+        st.subheader("✍️ 繪圖區")
+        if st.button("🗑️ 清空畫布"): st.session_state['canvas_key'] = f"canvas_{time.time()}"
+        
+        canvas_res = st_canvas(
+            fill_color="rgba(0,0,0,0)",
+            stroke_width=15, stroke_color="#FFFFFF", background_color="#000000",
+            height=300, width=400, drawing_mode="freedraw",
+            key=st.session_state.get('canvas_key', 'canvas_0'),
+            display_toolbar=True
+        )
+
+    with c2:
+        if canvas_res.image_data is not None and np.max(canvas_res.image_data) > 0:
+            # 處理畫布影像
+            raw = canvas_res.image_data.astype(np.uint8)
+            img_bgr = cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR) if raw.shape[2] == 4 else raw
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            
+            # 使用側邊欄參數二值化
+            # 注意：手寫板通常已經是黑底白字，不需要複雜閾值，但為了實驗一致性，我們還是跑一次流程
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            if params['erosion'] > 0:
+                binary = cv2.erode(binary, np.ones((3,3), np.uint8), iterations=params['erosion'])
+
+            # 抓輪廓
+            cnts, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            raw_boxes = []
+            for c in cnts:
+                if cv2.contourArea(c) < 50: continue
+                x, y, w, h = cv2.boundingRect(c)
+                raw_boxes.append((x,y,w,h))
+            
+            merged = merge_nearby_boxes(raw_boxes)
+            
+            results = []
+            draw_img = img_bgr.copy()
+            
+            for (x, y, w, h) in merged:
+                pad = 10
+                roi = binary[max(0, y-pad):min(binary.shape[0], y+h+pad), 
+                             max(0, x-pad):min(binary.shape[1], x+w+pad)]
+                
+                if roi.size == 0: continue
+                
+                # 取得詳細預測
+                res = ensemble_predict_advanced(roi, params['conf'])
+                if res['conf'] > 0.1: # 顯示所有可能的結果
+                    results.append(res)
+                    cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    cv2.putText(draw_img, str(res['final_label']), (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
+            st.image(draw_img, caption="偵測位置", channels="BGR", width=300)
+            
+            # 顯示儀表板
+            if results:
+                st.divider()
+                display_dashboard(results)
+        else:
+            st.info("請在左側書寫...")
+
+# ==========================================
+# 6. 上傳模式 (Upload)
+# ==========================================
+def run_upload_mode(params):
+    st.subheader("📂 圖片實驗室")
+    file = st.file_uploader("上傳圖片", type=["jpg", "png", "jpeg"])
     
     if file:
-        # 讀取圖片
         file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
-        img_origin = cv2.imdecode(file_bytes, 1)
+        img = cv2.imdecode(file_bytes, 1)
         
-        # 縮放過大圖片
-        h, w = img_origin.shape[:2]
-        if w > 800:
-            scale = 800 / w
-            img_origin = cv2.resize(img_origin, (800, int(h * scale)))
+        # 顯示原始與預處理圖 (Debug)
+        c_orig, c_bin = st.columns(2)
+        with c_orig: st.image(img, caption="原始圖片", use_container_width=True, channels="BGR")
         
-        gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
+        # 預處理
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        binary = get_binary_image(gray, params['method'], params['block'], params['c'])
+        if params['erosion'] > 0:
+            binary = cv2.erode(binary, np.ones((3,3), np.uint8), iterations=params['erosion'])
+            
+        with c_bin: st.image(binary, caption=f"二值化結果 ({params['method']})", use_container_width=True)
         
-        # --- 步驟 1: 使用開發者參數進行二值化 ---
-        binary = get_binary_image(gray, thresh_method, block_size, c_val)
-        
-        # 顯示中間產物 (Debug View)
-        if show_intermediate:
-            c_debug1, c_debug2 = st.columns(2)
-            with c_debug1: st.image(gray, caption="原始灰階", use_container_width=True)
-            with c_debug2: st.image(binary, caption=f"二值化 ({thresh_method})", use_container_width=True)
-
-        # --- 步驟 2: 輪廓偵測與切割 ---
-        # 這裡不使用過多的形態學操作，保留原始雜訊以供測試
+        # 抓數字
         cnts, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        digit_candidates = []
-        display_img = img_origin.copy()
-        
+        raw_boxes = []
         for c in cnts:
+            if cv2.contourArea(c) < 50: continue
             x, y, w, h = cv2.boundingRect(c)
-            if w * h < 100: continue # 過濾極小噪點
-            if h < 20: continue
+            # 簡單過濾
+            if w*h > img.shape[0]*img.shape[1]*0.9: continue
+            raw_boxes.append((x,y,w,h))
             
-            # 在原圖畫框
-            cv2.rectangle(display_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            cv2.putText(display_img, f"#{len(digit_candidates)+1}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            
-            roi = binary[y:y+h, x:x+w]
-            digit_candidates.append({"id": len(digit_candidates)+1, "roi": roi, "rect": (x,y,w,h)})
-
-        # 排序 (從左到右，從上到下)
-        digit_candidates.sort(key=lambda k: (k['rect'][1] // 50, k['rect'][0]))
-
-        # --- 步驟 3: 顯示全域結果 ---
-        st.image(display_img, caption=f"偵測到 {len(digit_candidates)} 個潛在區域", use_container_width=True, channels="BGR")
+        merged = merge_nearby_boxes(raw_boxes)
+        merged.sort(key=lambda b: (b[1]//50, b[0])) # 排序
         
-        if not digit_candidates:
-            st.warning("⚠️ 未偵測到任何數字，請調整左側『二值化參數』。")
-            return
-
+        results = []
+        for (x, y, w, h) in merged:
+            pad = params['erosion'] * 2
+            roi = binary[max(0, y-pad):min(binary.shape[0], y+h+pad), 
+                         max(0, x-pad):min(binary.shape[1], x+w+pad)]
+            
+            if roi.size == 0 or not check_complexity(roi): continue
+            
+            res = ensemble_predict_advanced(roi, params['conf'])
+            if res['conf'] > params['conf']:
+                results.append(res)
+        
+        # 顯示儀表板
         st.divider()
-        st.markdown("### 🔬 深度分析報告 (Deep Analysis Report)")
-        
-        # --- 步驟 4: 逐一分析並顯示詳細儀表板 ---
-        # 為了避免畫面過長，如果超過 10 個只顯示前 10 個
-        limit = 20
-        for i, item in enumerate(digit_candidates[:limit]):
-            res = analyze_digit(item['roi'])
-            
-            # 判斷模型是否衝突
-            models_agree = (res['cnn_label'] == res['knn_label'] == res['svm_label'])
-            status_icon = "🟢" if models_agree else "🔴"
-            if res['cnn_conf'] < 0.7: status_icon = "⚠️"
-
-            with st.container():
-                st.markdown(f"#### {status_icon} Digit #{item['id']} (Prediction: **{res['cnn_label']}**)")
-                
-                c_visual, c_stats, c_chart = st.columns([1, 2, 3])
-                
-                # [Col 1] 視覺化：模型看到的 28x28 Raw Input
-                with c_visual:
-                    # 放大顯示像素圖
-                    enlarged = cv2.resize(res['raw_img'], (150, 150), interpolation=cv2.INTER_NEAREST)
-                    st.image(enlarged, caption="28x28 Input (Raw)", clamp=True)
-                    st.caption(f"Conf: {res['cnn_conf']:.2f}")
-
-                # [Col 2] 數據：模型競技場
-                with c_stats:
-                    st.markdown("**Model Arena:**")
-                    match_data = {
-                        "Model": ["CNN", "KNN", "SVM"],
-                        "Pred": [res['cnn_label'], res['knn_label'], res['svm_label']]
-                    }
-                    st.dataframe(pd.DataFrame(match_data), hide_index=True, use_container_width=True)
-                    if not models_agree:
-                        st.error("模型意見分歧！")
-
-                # [Col 3] 圖表：機率分佈
-                with c_chart:
-                    st.markdown("**Probability Distribution (CNN):**")
-                    chart_df = pd.DataFrame({
-                        "Digit": list(range(10)),
-                        "Probability": res['probs']
-                    })
-                    st.bar_chart(chart_df, x="Digit", y="Probability", height=150)
-                
-                st.markdown("---")
-        
-        if len(digit_candidates) > limit:
-            st.info(f"還有 {len(digit_candidates) - limit} 個數字未顯示...")
+        if results:
+            st.success(f"共偵測到 {len(results)} 個數字")
+            display_dashboard(results)
+        else:
+            st.warning("未偵測到數字，請嘗試調整左側『二值化』或『侵蝕』參數。")
 
 # ==========================================
-# 5. 主程式入口
+# 7. 主程式入口
 # ==========================================
 def main():
-    st.title("🛠️ AI Developer Dashboard")
-    st.markdown("此工具專為 **開發者與資料科學家** 設計，用於分析模型行為、調整前處理參數與除錯。")
+    if 'page' not in st.session_state: st.session_state['page'] = 'welcome'
 
-    # --- 側邊欄：開發者參數控制台 ---
-    with st.sidebar:
-        st.header("⚙️ Config Lab")
-        
-        st.subheader("1. 影像前處理 (Preprocessing)")
-        thresh_method = st.selectbox("二值化演算法", ["Adaptive Gaussian", "Otsu", "Simple"], index=0)
-        
-        block_size = 11
-        c_val = 10
-        if thresh_method == "Adaptive Gaussian":
-            block_size = st.slider("Block Size (奇數)", 3, 51, 15, step=2, help="決定局部閾值的區域大小")
-            c_val = st.slider("C Constant", 0, 50, 10, help="從平均值減去的常數")
-        
-        show_intermediate = st.checkbox("顯示中間運算圖 (Binary Output)", value=True)
-        
-        st.divider()
-        st.subheader("2. 模型資訊")
-        st.info(f"CNN: {'✅ Loaded' if cnn_model else '❌ Missing'}")
-        st.info(f"KNN: {'✅ Loaded' if knn_model else '⚠️ Training...'}")
-        st.info(f"SVM: {'✅ Loaded' if svm_model else '⚠️ Training...'}")
+    # --- 歡迎頁面 (保留) ---
+    if st.session_state['page'] == 'welcome':
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c2:
+            st.markdown("""
+            <div class="welcome-container">
+                <div class="welcome-title">🛠️ AI Developer Lab</div>
+                <p>這是 App(3) 的增強版，專為開發者設計。<br>
+                包含模型投票分析、機率可視化與參數調校功能。</p>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("🚀 Enter Lab", use_container_width=True, type="primary"):
+                st.session_state['page'] = 'app'
+                st.rerun()
 
-    # 目前僅開放 Lab Mode (因為這是 Developer Tool)
-    run_lab_mode(thresh_method, block_size, c_val, show_intermediate)
+    # --- 主程式頁面 ---
+    elif st.session_state['page'] == 'app':
+        st.title("🛠️ AI Developer Dashboard")
+        
+        # --- 側邊欄：開發者參數控制台 (新增功能) ---
+        with st.sidebar:
+            st.header("⚙️ 參數實驗室")
+            mode = st.radio("模式選擇", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"])
+            
+            st.divider()
+            st.subheader("1. 影像處理 (Preprocessing)")
+            
+            # [新增] 二值化演算法選擇
+            thresh_method = st.selectbox("二值化演算法", ["Adaptive Gaussian", "Otsu", "Simple"], 
+                                       help="Adaptive: 適合光影不均\nOtsu: 自動尋找最佳閾值\nSimple: 固定閾值")
+            
+            block_size = 15
+            c_val = 10
+            
+            if thresh_method == "Adaptive Gaussian":
+                block_size = st.slider("Block Size (奇數)", 3, 51, 15, step=2)
+                c_val = st.slider("C Constant", 0, 50, 10)
+            
+            erosion = st.slider("Erosion (切割沾黏)", 0, 5, 0)
+            
+            st.subheader("2. 預測門檻")
+            min_conf = st.slider("Confidence Threshold", 0.0, 1.0, 0.5)
+            
+            if st.button("🏠 Back to Home"):
+                st.session_state['page'] = 'welcome'
+                st.rerun()
+
+            # 參數打包
+            params = {
+                "method": thresh_method, 
+                "block": block_size, 
+                "c": c_val, 
+                "erosion": erosion, 
+                "conf": min_conf
+            }
+
+        # --- 模式分流 ---
+        if cnn_model is None:
+            st.error("Model Missing! 請確認目錄下有 mnist_cnn.h5")
+        else:
+            if mode == "📷 鏡頭 (Live)":
+                run_camera_mode(params)
+            elif mode == "✍️ 手寫板 (Canvas)":
+                run_canvas_mode(params)
+            elif mode == "📂 上傳 (Upload)":
+                run_upload_mode(params)
 
 if __name__ == "__main__":
     main()
