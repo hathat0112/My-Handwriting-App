@@ -1,9 +1,9 @@
 import streamlit as st
 
 # ==========================================
-# 0. 頁面設定 (必須是第一個 Streamlit 指令！)
+# 0. 頁面設定 (必須是第一行指令)
 # ==========================================
-st.set_page_config(page_title="Handwriting AI (V90)", page_icon="✒️", layout="wide")
+st.set_page_config(page_title="Handwriting AI (V91)", page_icon="✒️", layout="wide")
 
 import cv2
 import numpy as np
@@ -19,17 +19,19 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
-# 環境變數設定
+# 環境變數
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-# [V87 舒適對焦參數]
-STABILITY_DURATION = 1.5  
-MOVEMENT_THRESHOLD = 120  
-CONFIDENCE_THRESHOLD = 0.60 
+# [V91 鏡頭參數：舒適對焦設定]
+# 參考自 app.py 的 V87 設定，讓鏡頭不會太快也不會太慢
+STABILITY_DURATION = 1.5    # 1.5秒：人類自然的對焦確認時間
+MOVEMENT_THRESHOLD = 120    # 容許手部自然晃動
+CONFIDENCE_THRESHOLD = 0.60 # 降低門檻，讓數字更容易被「吸住」
 ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
+# 極簡 CSS 風格 (來自 app (2).py)
 st.markdown("""
 <style>
     #MainMenu {visibility: hidden;}
@@ -76,7 +78,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 共用核心
+# 1. 共用核心與模型載入
 # ==========================================
 @st.cache_resource
 def load_models():
@@ -172,7 +174,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [V88] 權威仲裁預測 (1 vs 2 修正)
+# [V88/V91] 預測核心：加入權威仲裁
 def ensemble_predict(roi, min_conf):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -194,7 +196,7 @@ def ensemble_predict(roi, min_conf):
     final_conf = conf_cnn
     details = ""
     
-    # 修正邏輯：若 CNN 判斷為 1，但其他判斷為 2，聽 CNN 的
+    # 修正邏輯：若 CNN 判斷為 1，但其他判斷為 2，聽 CNN 的 (解決有底座的1誤判問題)
     if final_lbl == 2 and lbl_cnn == 1:
         final_lbl = 1
         details = " (CNN修正)"
@@ -211,7 +213,7 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (V87 舒適對焦)
+# 2. 鏡頭模式 (改用 V87 舒適對焦邏輯)
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -226,7 +228,7 @@ class LiveProcessor(VideoProcessorBase):
         self.frozen_frame = None
         self.frame_counter = 0
         
-        # 參數 (V87)
+        # [V91 設定] 舒適對焦：每 6 幀偵測一次
         self.skip_rate = 6  
         self.cached_rois = []
         self.session_start_time = time.time()
@@ -300,6 +302,7 @@ class LiveProcessor(VideoProcessorBase):
             
             for (x, y, w, h) in valid_boxes:
                 roi = binary_proc[y:y+h, x:x+w]
+                # 使用 CONFIDENCE_THRESHOLD (0.60) 進行判定
                 final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
                 
                 if final_conf > self.min_conf:
@@ -381,7 +384,7 @@ def run_camera_mode(erosion, dilation, min_conf):
                 st.info("⏳ 偵測中...")
 
 # ==========================================
-# 3. 手寫板模式
+# 3. 手寫板模式 (保留 app (2).py 邏輯)
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
@@ -470,7 +473,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (V83 邏輯 + V88 預測)
+# 4. 上傳模式 (保留 app (2).py 邏輯：變數修復+黑帽運算)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     
@@ -488,6 +491,7 @@ def run_upload_mode(erosion, dilation, min_conf):
         file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
         img_origin = cv2.imdecode(file_bytes, 1)
         
+        # [變數命名修正] 避免與迴圈變數衝突 (V83 修正)
         img_h, img_w = img_origin.shape[:2]
         
         if img_w > 1000:
@@ -497,7 +501,7 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # BlackHat 核心 (V79)
+        # [核心] 黑帽運算去陰影 (V79 邏輯)
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
@@ -512,11 +516,12 @@ def run_upload_mode(erosion, dilation, min_conf):
         valid_boxes_data = []
         for c in cnts:
             area = cv2.contourArea(c)
-            if area < 80: continue 
+            if area < 80: continue # 寬鬆門檻
             
             x, y, w, h = cv2.boundingRect(c)
             if w < 10 and h < 10: continue
             
+            # 使用正確的 img_w 變數
             if w * h > (img_h * img_w * 0.9): continue
             
             roi = processed[y:y+h, x:x+w]
