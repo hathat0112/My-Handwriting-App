@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V109)", 
+    page_title="Handwriting AI (V110)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -53,11 +53,6 @@ st.markdown("""
     .welcome-container {text-align: center; padding: 50px; border-radius: 15px; background: rgba(128, 128, 128, 0.1); margin-top: 50px;}
     .welcome-title {font-size: 3rem; font-weight: 700; margin-bottom: 1rem; color: #333;}
     .welcome-desc {font-size: 1.2rem; color: #666; margin-bottom: 2rem;}
-    
-    @media (prefers-color-scheme: dark) {
-        .welcome-title {color: #ddd;}
-        .welcome-desc {color: #aaa;}
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -118,21 +113,22 @@ except Exception as e:
     st.error(f"❌ 模型載入失敗: {e}")
     st.stop()
 
-# [V109 修復] 恢復 Erosion (腐蝕) 功能，讓拉桿生效
-def v65_morphology(binary_img, erosion, dilation):
+# [V110 核心] 雙層處理邏輯
+# 1. 產生用於"定位"的影像 (嚴重腐蝕，為了切開)
+def get_contour_mask(binary_img, erosion):
     res = binary_img.copy()
-    
-    # 1. 優先執行切割 (如果使用者有設定)
     if erosion > 0:
-        kernel_erode = np.ones((3,3), np.uint8)
-        res = cv2.erode(res, kernel_erode, iterations=erosion)
-
-    # 2. 閉運算：修補因切割產生的微小斷裂
+        kernel = np.ones((3,3), np.uint8)
+        res = cv2.erode(res, kernel, iterations=erosion)
+    # 閉運算稍微修補一下斷裂
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=2)
-    
-    # 3. 膨脹：恢復筆畫厚度
-    iter_dil = max(1, dilation)
+    res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=1)
+    return res
+
+# 2. 產生用於"辨識"的影像 (健康肥胖，為了AI)
+def get_prediction_img(binary_img, dilation):
+    res = binary_img.copy()
+    iter_dil = max(1, dilation) # 至少膨脹一次，保證線條清晰
     kernel_dil = np.ones((3,3), np.uint8)
     res = cv2.dilate(res, kernel_dil, iterations=iter_dil)
     return res
@@ -148,7 +144,6 @@ def merge_nearby_boxes(boxes, distance_threshold=20):
         merged = False
         new_rects = []
         used = [False] * len(rects)
-        
         for i in range(len(rects)):
             if used[i]: continue
             x1, y1, x2, y2 = rects[i]
@@ -165,7 +160,6 @@ def merge_nearby_boxes(boxes, distance_threshold=20):
                     used[j] = True
                     merged = True
             new_rects.append([x1, y1, x2, y2])
-            
         if not merged: break
         rects = np.array(new_rects)
 
@@ -194,15 +188,19 @@ def preprocess_input(roi):
     flat_in = canvas.reshape(1, 784).astype('float32') / 255.0
     return cnn_in, flat_in
 
-def draw_label(img, text, x, y, color=(0, 255, 255)):
+def draw_label(img, text, x, y, color=(0, 255, 255), is_dashed=False):
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 1.0
     thickness = 2
     (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
-    cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
-    cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
+    
+    if is_dashed:
+        # 畫虛線框 (黃色)
+        cv2.rectangle(img, (x, y), (x + lw + 10, y + 20), color, 1) # 簡單示意
+    else:
+        cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
+        cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [V108] 寬容嚴格模式：CNN > 85% 即通過
 def ensemble_predict(roi, min_conf, strict_mode=False):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -222,13 +220,10 @@ def ensemble_predict(roi, min_conf, strict_mode=False):
     if knn_model and lbl_knn == lbl_cnn: agree_count += 1
     if svm_model and lbl_svm == lbl_cnn: agree_count += 1
     
-    # 嚴格模式邏輯
     if strict_mode:
         if (knn_model and lbl_knn != lbl_cnn) or (svm_model and lbl_svm != lbl_cnn):
-            # CNN 信心 > 85% 則強制保留
             if final_conf < 0.85:
                 return -1, 0.0, " (Disagree)"
-        
         if final_conf < 0.8:
             return -1, 0.0, " (Low Conf)"
 
@@ -301,9 +296,9 @@ class LiveProcessor(VideoProcessorBase):
 
             if (current_time - self.last_process_time) < self.process_interval:
                 if len(self.cached_rois) > 0:
-                    for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
+                    for (dx, dy, dw, dh, txt, box_color, dashed) in self.cached_rois:
                         cv2.rectangle(display_img, (dx, dy), (dx+dw, dy+dh), box_color, 2)
-                        draw_label(display_img, txt, dx, dy)
+                        draw_label(display_img, txt, dx, dy, box_color, dashed)
                 if is_warming_up:
                     cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 return av.VideoFrame.from_ndarray(display_img, format="bgr24")
@@ -315,13 +310,18 @@ class LiveProcessor(VideoProcessorBase):
             gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
             blur = cv2.GaussianBlur(gray, (5, 5), 0) 
             binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
-            binary_proc = v65_morphology(binary, self.erosion, self.dilation)
-            cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # [V110] 雙層處理
+            mask_img = get_contour_mask(binary, self.erosion)
+            pred_img = get_prediction_img(binary, self.dilation)
+            
+            cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             raw_boxes = []
+            min_area = 20 if self.erosion > 3 else 150 # [V110] 如果腐蝕大，容許面積就小
+            
             for c in cnts:
-                area = cv2.contourArea(c)
-                if area < 150: continue 
+                if cv2.contourArea(c) < min_area: continue 
                 x, y, w, h = cv2.boundingRect(c)
                 if x<5 or y<5: continue
                 aspect_ratio = w / float(h)
@@ -335,16 +335,26 @@ class LiveProcessor(VideoProcessorBase):
             self.cached_rois = []
             
             for (x, y, w, h) in merged_boxes:
-                roi = binary_proc[y:y+h, x:x+w]
+                # [V110] 從胖胖的 pred_img 截圖，但要放大框框
+                pad = self.erosion * 2 # 補回被切掉的邊緣
+                roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
+                               max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
+                
+                if roi.size == 0: continue
+                
                 final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf, self.strict_mode)
                 
+                rx, ry = x + roi_rect[0], y + roi_rect[1]
+                
                 if final_lbl != -1 and final_conf > self.min_conf:
-                    rx, ry = x + roi_rect[0], y + roi_rect[1]
-                    box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
-                    txt = str(final_lbl) 
-                    self.cached_rois.append((rx, ry, w, h, txt, box_color))
+                    box_color = (0, 255, 0)
+                    self.cached_rois.append((rx, ry, w, h, str(final_lbl), box_color, False))
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
-                    draw_label(display_img, txt, rx, ry)
+                    draw_label(display_img, str(final_lbl), rx, ry, box_color, False)
+                elif self.strict_mode: # 被嚴格模式擋下的，顯示黃框
+                    box_color = (0, 255, 255)
+                    self.cached_rois.append((rx, ry, w, h, "?", box_color, True))
+                    cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 1)
 
             if len(self.cached_rois) > 0:
                 self.stability_start_time = time.time() 
@@ -358,7 +368,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v109-cam", 
+            key="v110-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
@@ -429,14 +439,19 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
             img_bgr = cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR) if raw.shape[2] == 4 else raw
             gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            processed = v65_morphology(binary, erosion, dilation)
             
-            cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # [V110] 雙層處理
+            mask_img = get_contour_mask(binary, erosion)
+            pred_img = get_prediction_img(binary, dilation)
+            
+            cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             raw_boxes = []
+            min_area = 50 if erosion > 3 else 400 # 腐蝕大則門檻低
+            
             for c in cnts:
                 area = cv2.contourArea(c)
-                if area < 400: continue 
+                if area < min_area: continue 
                 x, y, w, h = cv2.boundingRect(c)
                 if h < 20 or w < 10: continue 
                 raw_boxes.append((x,y,w,h))
@@ -449,15 +464,23 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
             valid_count = 1
             
             for i, (x, y, w, h) in enumerate(merged_boxes):
-                roi = processed[y:y+h, x:x+w]
+                # [V110] 放大框框取樣
+                pad = erosion * 2
+                roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
+                               max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
+                
+                if roi.size == 0: continue
+                
                 final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
                 
                 if final_lbl != -1 and final_conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    draw_label(draw_img, f"#{valid_count}", x, y)
+                    draw_label(draw_img, f"#{valid_count}", x, y, (0, 255, 0), False)
                     status_text = f"{int(final_conf*100)}%{details}"
                     results_list.append({"ID": f"#{valid_count}", "數字": str(final_lbl), "信心度": status_text})
                     valid_count += 1
+                elif strict_mode:
+                    cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 255), 1) # 黃色
             
             if results_list:
                 st.dataframe(results_list, hide_index=True, use_container_width=True)
@@ -500,18 +523,20 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
         _, binary = cv2.threshold(blackhat_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
-        kernel_link = np.ones((3,3), np.uint8)
-        processed = cv2.dilate(binary, kernel_link, iterations=1)
-        if dilation > 0: processed = cv2.dilate(processed, None, iterations=dilation)
+        # [V110] 雙層處理
+        mask_img = get_contour_mask(binary, erosion)
+        pred_img = get_prediction_img(binary, dilation)
         
-        cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         raw_boxes = []
+        min_area = 20 if erosion > 3 else 80
+        
         for c in cnts:
             area = cv2.contourArea(c)
-            if area < 80: continue 
+            if area < min_area: continue 
             x, y, w, h = cv2.boundingRect(c)
-            if w < 10 and h < 10: continue
+            if w < 5 and h < 5: continue
             if w * h > (img_h * img_w * 0.9): continue
             if y + h > img_h - 10: continue 
             raw_boxes.append((x,y,w,h))
@@ -521,8 +546,15 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
         
         valid_boxes_data = []
         for (x, y, w, h) in merged_boxes:
-            roi = processed[y:y+h, x:x+w]
+            # 放大取樣
+            pad = erosion * 2
+            roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
+                           max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
+            
+            if roi.size == 0: continue
+            
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
+            
             if final_lbl != -1 and final_conf > min_conf:
                 valid_boxes_data.append({'rect': (x,y,w,h), 'lbl': final_lbl, 'conf': final_conf, 'details': details})
 
@@ -535,7 +567,7 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             for item in valid_boxes_data:
                 x, y, w, h = item['rect']
                 cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
-                draw_label(display_img, f"#{valid_count}", x, y)
+                draw_label(display_img, f"#{valid_count}", x, y, (0, 255, 0), False)
                 results_list.append({"ID": f"#{valid_count}", "數字": str(item['lbl']), "信心度": f"{int(item['conf']*100)}%{item['details']}"})
                 valid_count += 1
             
@@ -549,7 +581,7 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
                 st.warning("No digits found.")
             st.divider()
             with st.expander("查看 AI 黑帽運算 (Debug)"):
-                st.image(processed, use_container_width=True, caption="BlackHat Vision")
+                st.image(mask_img, use_container_width=True, caption="Split Mask (Eroded)")
 
 # ==========================================
 # 5. 主程式分流 (含歡迎頁面)
@@ -589,7 +621,7 @@ def main():
                 <div class="guide-text">
                 <b>💡 調整指南</b><br>
                 • <b>Strict Mode</b>: 打勾後，非數字的塗鴉會被過濾。<br>
-                • <b>Erosion</b>: 數字黏在一起時調大。<br>
+                • <b>Erosion</b>: 數字黏在一起時調大 (現在有效了!)。<br>
                 • <b>Dilation</b>: 筆畫太淡或斷掉時調大。
                 </div>
                 """, unsafe_allow_html=True)
