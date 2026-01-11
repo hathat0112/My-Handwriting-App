@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V102)", 
+    page_title="Handwriting AI (V103)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -128,7 +128,9 @@ def v65_morphology(binary_img, erosion, dilation):
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=2)
     if dilation > 0:
-        res = cv2.dilate(res, None, iterations=dilation)
+        # [V103] 加強膨脹核心，讓細線更容易連起來
+        kernel_dil = np.ones((3,3), np.uint8)
+        res = cv2.dilate(res, kernel_dil, iterations=dilation)
     return res
 
 def center_by_moments(img):
@@ -154,8 +156,8 @@ def preprocess_input(roi):
 
 def draw_label(img, text, x, y, color=(0, 255, 255)):
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 1.0 # 字體大小適中
-    thickness = 2
+    scale = 1.5 # 數字再加大一點
+    thickness = 3
     (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
@@ -183,7 +185,12 @@ def ensemble_predict(roi, min_conf):
     if agree_count == 2:
         final_conf = min(0.99, final_conf + 0.05)
     else:
-        final_conf = max(0.0, final_conf - 0.15)
+        # [V103] 即使大家意見不合，只要 CNN 很有把握，就不扣太多分
+        if conf_cnn > 0.8:
+            final_conf = conf_cnn
+        else:
+            final_conf = max(0.0, final_conf - 0.15)
+            
         disagreements = []
         if knn_model and lbl_knn != lbl_cnn: disagreements.append(f"K:{lbl_knn}")
         if svm_model and lbl_svm != lbl_cnn: disagreements.append(f"S:{lbl_svm}")
@@ -192,14 +199,14 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (V102: 強制降低解析度)
+# 2. 鏡頭模式 (V103: 銳化濾鏡 + 參數優化)
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
         self.model = cnn_model
         self.erosion = 0
-        self.dilation = 2
-        self.min_conf = 0.5
+        self.dilation = 4 # [V103] 預設增肥筆畫，讓細字更清楚
+        self.min_conf = 0.40 # [V103] 降低門檻，避免漏抓
         
         self.last_boxes = []
         self.stability_start_time = None
@@ -244,7 +251,6 @@ class LiveProcessor(VideoProcessorBase):
             roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
             cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 2)
 
-            # 時間閥門：使用快取結果
             if (current_time - self.last_process_time) < self.process_interval:
                 if len(self.cached_rois) > 0:
                     for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
@@ -259,21 +265,27 @@ class LiveProcessor(VideoProcessorBase):
             roi_img = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
             if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
-            gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
+            # [V103 關鍵] 影像銳化：讓模糊的 7 變清楚
+            kernel_sharpen = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+            sharpened = cv2.filter2D(roi_img, -1, kernel_sharpen)
+            
+            gray = cv2.cvtColor(sharpened, cv2.COLOR_BGR2GRAY)
+            # 使用較小的模糊，保留細節
             blur = cv2.GaussianBlur(gray, (3, 3), 0) 
-            binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
+            binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 8) # C值調低讓線條更容易出現
             binary_proc = v65_morphology(binary, self.erosion, self.dilation)
             
             cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             valid_boxes = []
-            raw_boxes_for_stability = []
             
             for c in cnts:
-                if cv2.contourArea(c) < 300: continue
+                # [V103] 大幅降低面積門檻，抓細小數字 (1, 2, 3)
+                if cv2.contourArea(c) < 100: continue 
                 x, y, w, h = cv2.boundingRect(c)
                 if x<5 or y<5: continue
+                # 排除太細長的雜訊
+                if w < 5 or h < 10: continue
                 valid_boxes.append((x,y,w,h))
-                raw_boxes_for_stability.append({'box': (x+roi_rect[0], y+roi_rect[1], w, h)})
             
             valid_boxes.sort(key=lambda b: b[0])
             self.cached_rois = []
@@ -289,50 +301,12 @@ class LiveProcessor(VideoProcessorBase):
                     box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
                     
                     txt = str(final_lbl) 
-                    
                     self.cached_rois.append((rx, ry, w, h, txt, box_color))
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
                     draw_label(display_img, txt, rx, ry)
 
-            if len(raw_boxes_for_stability) == 0:
-                self.stability_start_time = None
-            elif len(self.last_boxes) == 0:
-                self.last_boxes = raw_boxes_for_stability
-                self.stability_start_time = time.time()
-            else:
-                total_movement = 0
-                for curr_box in raw_boxes_for_stability:
-                    c_x, c_y, _, _ = curr_box["box"]
-                    min_dist = 99999
-                    for last_box in self.last_boxes:
-                        l_x, l_y, _, _ = last_box["box"]
-                        dist = abs(c_x - l_x) + abs(c_y - l_y)
-                        if dist < min_dist: min_dist = dist
-                    if min_dist < 50: total_movement += min_dist
-                    else: total_movement += 30 
-                
-                count_diff = abs(len(raw_boxes_for_stability) - len(self.last_boxes))
-                total_movement += count_diff * 50 
-                self.last_boxes = raw_boxes_for_stability
-
-                if total_movement < MOVEMENT_THRESHOLD and not is_warming_up:
-                    if self.stability_start_time is None: self.stability_start_time = time.time()
-                    elapsed = time.time() - self.stability_start_time
-                    progress = min(elapsed / STABILITY_DURATION, 1.0)
-                    
-                    bar_y = h_f - 20 
-                    bar_w = int(600 * progress)
-                    color = (0, 255, 255) if progress < 1.0 else (0, 255, 0)
-                    cv2.rectangle(display_img, (20, bar_y - 15), (20 + bar_w, bar_y), color, -1)
-                    cv2.rectangle(display_img, (20, bar_y - 15), (w_f - 20, bar_y), (255, 255, 255), 2)
-                    
-                    if elapsed >= STABILITY_DURATION and detected_something:
-                        self.frozen = True
-                        self.frozen_frame = display_img.copy()
-                else:
-                    self.stability_start_time = time.time()
-                    if is_warming_up: 
-                        cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            if len(self.cached_rois) > 0:
+                self.stability_start_time = time.time() # 只要有抓到東西，就視為活躍
 
             return av.VideoFrame.from_ndarray(display_img, format="bgr24")
         except Exception as e:
@@ -343,22 +317,22 @@ def run_camera_mode(erosion, dilation, min_conf):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v102-cam", 
+            key="v103-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
             async_processing=True,
-            # [V102 關鍵] 強制瀏覽器使用低解析度，大幅降低延遲
             media_stream_constraints={
                 "video": {
-                    "width": {"min": 480, "ideal": 480, "max": 640},
-                    "height": {"min": 360, "ideal": 360, "max": 480},
+                    "width": {"min": 480, "ideal": 640, "max": 640}, # 稍微拉回一點解析度
+                    "height": {"min": 360, "ideal": 480, "max": 480},
                     "frameRate": {"max": 30},
                 }
             }
         )
     with col2:
         if ctx.video_processor:
+            # V103 預設值修正：Dilation 加大，Confidence 降低
             ctx.video_processor.update_params(erosion, dilation, min_conf)
             if st.button("🔄 重新掃描", use_container_width=True):
                 ctx.video_processor.resume()
@@ -456,7 +430,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (V98: 邊緣過濾)
+# 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     file = st.file_uploader("Drop an image here", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
@@ -481,7 +455,6 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # BlackHat 運算
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
@@ -496,13 +469,12 @@ def run_upload_mode(erosion, dilation, min_conf):
         valid_boxes_data = []
         for c in cnts:
             area = cv2.contourArea(c)
-            if area < 80: continue 
+            # [V103] 上傳模式也放寬門檻
+            if area < 50: continue 
             x, y, w, h = cv2.boundingRect(c)
-            if w < 10 and h < 10: continue
+            if w < 5 and h < 5: continue
             if w * h > (img_h * img_w * 0.9): continue
-            
-            if y + h > img_h - 10: 
-                continue 
+            if y + h > img_h - 10: continue 
 
             roi = processed[y:y+h, x:x+w]
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
@@ -537,7 +509,7 @@ def run_upload_mode(erosion, dilation, min_conf):
                 st.image(processed, use_container_width=True, caption="BlackHat Vision")
 
 # ==========================================
-# 5. 主程式分流 (含歡迎頁面)
+# 5. 主程式分流
 # ==========================================
 def main():
     try:
@@ -580,8 +552,8 @@ def main():
                 """, unsafe_allow_html=True)
                 
                 erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0, help="把線條變細，用來分開黏在一起的字")
-                dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2, help="把線條變粗，用來連接斷掉的筆畫")
-                min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字")
+                dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 4, help="把線條變粗，用來連接斷掉的筆畫") # 預設改為4
+                min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.40, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字") # 預設改為0.40
             
             if st.sidebar.button("🏠 回到首頁"):
                 st.session_state['page'] = 'welcome'
