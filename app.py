@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V123)", 
+    page_title="Handwriting AI (V124)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -227,7 +227,6 @@ def ensemble_predict(roi, min_conf, strict_mode=False):
     if knn_model and lbl_knn == lbl_cnn: agree_count += 1
     if svm_model and lbl_svm == lbl_cnn: agree_count += 1
     
-    # 嚴格模式邏輯：只在 Strict Mode = True 時執行
     if strict_mode:
         if (knn_model and lbl_knn != lbl_cnn) or (svm_model and lbl_svm != lbl_cnn):
             if final_conf < 0.85:
@@ -432,7 +431,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v120-cam", 
+            key="v124-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
@@ -447,8 +446,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
         )
     with col2:
         if ctx.video_processor:
-            # 鏡頭模式：維持 Strict Mode = True
-            ctx.video_processor.update_params(erosion, dilation, min_conf, strict_mode=True)
+            ctx.video_processor.update_params(erosion, dilation, min_conf, strict_mode)
             if st.button("🔄 重新掃描", use_container_width=True):
                 ctx.video_processor.resume()
             if ctx.video_processor.frozen:
@@ -534,7 +532,6 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 
                 if roi.size == 0: continue
                 
-                # 手寫板模式：維持 Strict Mode = True 以過濾笑臉
                 if not check_complexity(roi): continue
 
                 final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=True)
@@ -550,9 +547,6 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 st.dataframe(results_list, hide_index=True, use_container_width=True)
             else:
                 st.info("Waiting for input...")
-            
-            with st.expander("察看結果"):
-                st.image(draw_img, caption="Detection", channels="BGR", use_container_width=True)
         else:
             st.markdown("*Ready to analyze...*")
 
@@ -615,10 +609,9 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             
             if roi.size == 0: continue
             
-            # [V122] 上傳模式：不檢查複雜度，不啟用 Strict Mode
-            # if not check_complexity(roi): continue # 移除這行，允許複雜/雜訊的數字
+            if not check_complexity(roi): continue
 
-            final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False) # 強制 False
+            final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False)
             
             if final_lbl != -1 and final_conf > min_conf:
                 valid_boxes_data.append({'rect': (x,y,w,h), 'lbl': final_lbl, 'conf': final_conf, 'details': details})
@@ -644,9 +637,6 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
                 st.dataframe(results_list, hide_index=True, use_container_width=True)
             else:
                 st.warning("No digits found.")
-            st.divider()
-            with st.expander("察看結果"):
-                st.image(mask_img, use_container_width=True, caption="Split Mask (Eroded)")
 
 # ==========================================
 # 5. 主程式分流 (含歡迎頁面)
@@ -685,9 +675,8 @@ def main():
                 st.markdown("""
                 <div class="guide-text">
                 <b>💡 調整指南</b><br>
-                • <b>Strict Mode</b>: 打勾後，非數字的塗鴉會被過濾。<br>
                 • <b>Erosion</b>: 數字黏在一起時調大。<br>
-                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。
+                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。<br>
                 </div>
                 """, unsafe_allow_html=True)
                 
