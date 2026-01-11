@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V118)", 
+    page_title="Handwriting AI (V120)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -28,7 +28,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # 參數設定
 STABILITY_DURATION = 3.0    
-MOVEMENT_THRESHOLD = 120    
+MOVEMENT_THRESHOLD = 70     
 SHRINK_PX = 4
 
 RTC_CONFIGURATION = RTCConfiguration(
@@ -132,14 +132,23 @@ def get_prediction_img(binary_img, dilation):
         res = cv2.dilate(res, kernel_dil, iterations=dilation)
     return res
 
+# [V120 改良] 複雜度檢查：忽略微小的雜訊洞
 def check_complexity(roi):
     cnts, hierarchy = cv2.findContours(roi, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     if len(cnts) <= 1: return True
+    
     internal_shapes = 0
     if hierarchy is not None:
-        for h in hierarchy[0]:
-            if h[3] != -1: 
-                internal_shapes += 1
+        # 遍歷所有輪廓
+        for i, h in enumerate(hierarchy[0]):
+            # 如果這個輪廓有父節點 (h[3] != -1)，代表它是洞
+            if h[3] != -1:
+                # [V120] 檢查這個洞的大小
+                hole_area = cv2.contourArea(cnts[i])
+                # 只有大於 5 像素的洞才算數，忽略陰影造成的噪點
+                if hole_area > 5:
+                    internal_shapes += 1
+    
     if internal_shapes > 2:
         return False 
     return True
@@ -225,6 +234,7 @@ def ensemble_predict(roi, min_conf, strict_mode=False):
     if knn_model and lbl_knn == lbl_cnn: agree_count += 1
     if svm_model and lbl_svm == lbl_cnn: agree_count += 1
     
+    # 嚴格模式：只在鏡頭模式下啟用，上傳模式強制關閉
     if strict_mode:
         if (knn_model and lbl_knn != lbl_cnn) or (svm_model and lbl_svm != lbl_cnn):
             if final_conf < 0.85:
@@ -248,7 +258,7 @@ def ensemble_predict(roi, min_conf, strict_mode=False):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (V118: 縮圖運算 + 高效能)
+# 2. 鏡頭模式
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -265,7 +275,7 @@ class LiveProcessor(VideoProcessorBase):
         self.frozen_frame = None
         self.cached_rois = [] 
         self.last_process_time = 0 
-        self.process_interval = 0.2 # 稍微加快一點運算頻率
+        self.process_interval = 0.25 
         self.session_start_time = time.time()
         self.warmup_duration = 2.0 
 
@@ -297,7 +307,6 @@ class LiveProcessor(VideoProcessorBase):
             display_img = img.copy()
             h_f, w_f = img.shape[:2]
             
-            # 視窗比例 70%
             roi_w = int(w_f * 0.7)
             roi_h = int(h_f * 0.7)
             roi_x = (w_f - roi_w) // 2
@@ -307,73 +316,55 @@ class LiveProcessor(VideoProcessorBase):
             roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
             cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 3)
 
-            # 時間閥門
             if (current_time - self.last_process_time) < self.process_interval:
-                # 繪製快取結果
                 if len(self.cached_rois) > 0:
                     for (dx, dy, dw, dh, txt, box_color, dashed) in self.cached_rois:
                         cv2.rectangle(display_img, (dx, dy), (dx+dw, dy+dh), box_color, 2)
                         draw_label(display_img, txt, dx, dy, box_color, dashed)
-                # 繪製進度條 (如果在倒數中)
                 if self.stability_start_time is not None:
                     elapsed = current_time - self.stability_start_time
                     progress = min(elapsed / STABILITY_DURATION, 1.0)
                     self._draw_progress_bar(display_img, w_f, h_f, progress)
-                
                 if is_warming_up:
                     cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
             self.last_process_time = current_time
+            roi_img = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
+            if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
+
+            gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0) 
+            binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
             
-            # [V118] 縮圖運算核心：大幅減少運算量，提升流暢度
-            # 1. 縮小影像 (Scale 0.5 -> 面積變 1/4 -> 速度快 4 倍)
-            scale_factor = 0.5
-            small_roi = cv2.resize(img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]], (0,0), fx=scale_factor, fy=scale_factor)
+            mask_img = get_contour_mask(binary, self.erosion)
+            pred_img = get_prediction_img(binary, self.dilation)
             
-            # 2. 在小圖上做昂貴的運算
-            gray_small = cv2.cvtColor(small_roi, cv2.COLOR_BGR2GRAY)
-            blur_small = cv2.GaussianBlur(gray_small, (5, 5), 0)
-            binary_small = cv2.adaptiveThreshold(blur_small, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
-            
-            mask_small = get_contour_mask(binary_small, self.erosion)
-            
-            cnts, _ = cv2.findContours(mask_small, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             raw_boxes = []
-            # 門檻也要跟著縮小
-            min_area_small = (50 if self.erosion > 3 else 150) * (scale_factor * scale_factor)
+            min_area = 50 if self.erosion > 3 else 150
             
             for c in cnts:
-                if cv2.contourArea(c) < min_area_small: continue 
-                sx, sy, sw, sh = cv2.boundingRect(c)
-                # 在小圖上快篩
-                if sx < 2 or sy < 2: continue
-                aspect_ratio = sw / float(sh)
+                if cv2.contourArea(c) < min_area: continue 
+                x, y, w, h = cv2.boundingRect(c)
+                if x<5 or y<5: continue
+                aspect_ratio = w / float(h)
                 if aspect_ratio > 1.5: continue 
-                if sh < (15 * scale_factor): continue
-                if sx < (10 * scale_factor): continue 
-                
-                # 3. 座標還原 (放大回原圖尺寸)
-                bx = int(sx / scale_factor)
-                by = int(sy / scale_factor)
-                bw = int(sw / scale_factor)
-                bh = int(sh / scale_factor)
-                
-                raw_boxes.append((bx, by, bw, bh))
+                if h < 15: continue
+                if x < 10: continue 
+                raw_boxes.append((x,y,w,h))
             
             merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=20)
             merged_boxes.sort(key=lambda b: b[0])
             self.cached_rois = []
             
-            # 準備辨識用的高解析圖 (只做一次)
             roi_hd = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
             gray_hd = cv2.cvtColor(roi_hd, cv2.COLOR_BGR2GRAY)
             blur_hd = cv2.GaussianBlur(gray_hd, (5, 5), 0)
             binary_hd = cv2.adaptiveThreshold(blur_hd, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
             pred_img_hd = get_prediction_img(binary_hd, self.dilation)
 
-            # 防手震計算
             current_centers = []
             for (x, y, w, h) in merged_boxes:
                 current_centers.append((x + w//2, y + h//2))
@@ -390,7 +381,6 @@ class LiveProcessor(VideoProcessorBase):
 
             detected_something = False
             for (x, y, w, h) in merged_boxes:
-                # 4. 在原圖上切割並辨識
                 pad = self.erosion * 2
                 roi_final = pred_img_hd[max(0, y-pad):min(pred_img_hd.shape[0], y+h+pad), 
                                         max(0, x-pad):min(pred_img_hd.shape[1], x+w+pad)]
@@ -400,7 +390,6 @@ class LiveProcessor(VideoProcessorBase):
 
                 final_lbl, final_conf, _ = ensemble_predict(roi_final, self.min_conf, self.strict_mode)
                 
-                # 轉回全螢幕座標
                 rx, ry = x + roi_rect[0], y + roi_rect[1]
                 
                 if final_lbl != -1 and final_conf > self.min_conf:
@@ -414,7 +403,6 @@ class LiveProcessor(VideoProcessorBase):
                     self.cached_rois.append((rx, ry, w, h, "?", box_color, True))
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 1)
 
-            # 穩定度邏輯
             is_stable = (detected_something and total_movement < MOVEMENT_THRESHOLD)
             if is_stable:
                 if self.stability_start_time is None: self.stability_start_time = current_time
@@ -451,7 +439,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v118-cam", 
+            key="v120-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
@@ -552,9 +540,10 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 
                 if roi.size == 0: continue
                 
+                # 手寫板模式不使用嚴格過濾
                 if not check_complexity(roi): continue
 
-                final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
+                final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False)
                 
                 if final_lbl != -1 and final_conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
@@ -562,8 +551,6 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                     status_text = f"{int(final_conf*100)}%{details}"
                     results_list.append({"ID": f"#{valid_count}", "數字": str(final_lbl), "信心度": status_text})
                     valid_count += 1
-                elif strict_mode:
-                    cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 255), 1)
             
             if results_list:
                 st.dataframe(results_list, hide_index=True, use_container_width=True)
@@ -636,7 +623,9 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             
             if not check_complexity(roi): continue
 
-            final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
+            # 上傳模式強制關閉嚴格模式，確保陰影下的數字能顯示
+            final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False)
+            
             if final_lbl != -1 and final_conf > min_conf:
                 valid_boxes_data.append({'rect': (x,y,w,h), 'lbl': final_lbl, 'conf': final_conf, 'details': details})
 
