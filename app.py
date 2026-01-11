@@ -1,13 +1,13 @@
 import streamlit as st
 
 # ==========================================
-# 0. 頁面設定 (必須是第一行)
+# 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V97)", 
+    page_title="Handwriting AI (V98)", 
     page_icon="✒️", 
     layout="wide",
-    initial_sidebar_state="collapsed" # 首頁時先收起側邊欄，比較乾淨
+    initial_sidebar_state="expanded"
 )
 
 import cv2
@@ -30,75 +30,31 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 # 參數設定
 STABILITY_DURATION = 1.5    
 MOVEMENT_THRESHOLD = 120    
-CONFIDENCE_THRESHOLD = 0.60 
 ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
-# [V96 CSS 修復] 移除畫布邊框，達成沉浸式效果
+# CSS 修飾
 st.markdown("""
 <style>
-    /* 1. 確保選單按鈕可見 */
-    header[data-testid="stHeader"] {
-        background-color: transparent;
-        z-index: 999;
-    }
-    
-    /* 2. 側邊欄樣式 */
-    section[data-testid="stSidebar"] {
-        border-right: 1px solid rgba(128, 128, 128, 0.2);
-    }
-    
-    /* 3. 按鈕通用樣式 */
+    header[data-testid="stHeader"] {background-color: transparent; z-index: 999;}
+    section[data-testid="stSidebar"] {border-right: 1px solid rgba(128, 128, 128, 0.2);}
     .stButton>button {
-        background-color: #4a4a4a !important;
-        color: white !important;
-        border-radius: 8px;
-        border: none;
-        transition: all 0.3s ease;
+        background-color: #4a4a4a !important; color: white !important; border: none; transition: all 0.3s ease;
     }
-    .stButton>button:hover {
-        background-color: #FF4B4B !important;
-        transform: scale(1.02);
-    }
-
-    /* 4. 移除畫布的所有邊框與陰影 */
-    iframe[title="streamlit_drawable_canvas.st_canvas"] {
-        border: none !important;
-        box-shadow: none !important;
-        background-color: transparent !important;
-    }
-    
-    /* 5. 確保畫布外層容器也是透明的 */
-    div[data-testid="stVerticalBlock"] > div {
-        background-color: transparent;
-    }
-
-    /* 6. 隱藏 Footer */
+    .stButton>button:hover {background-color: #FF4B4B !important; transform: scale(1.02);}
+    iframe[title="streamlit_drawable_canvas.st_canvas"] {border: none !important; box-shadow: none !important; background-color: transparent !important;}
+    div[data-testid="stVerticalBlock"] > div {background-color: transparent;}
     footer {visibility: hidden;}
+    .block-container {padding-top: 2rem;}
+    .welcome-container {text-align: center; padding: 50px; border-radius: 15px; background: rgba(128, 128, 128, 0.1); margin-top: 50px;}
+    .welcome-title {font-size: 3rem; font-weight: 700; margin-bottom: 1rem; color: #333;}
+    .welcome-desc {font-size: 1.2rem; color: #666; margin-bottom: 2rem;}
     
-    /* 7. 調整頂部間距 */
-    .block-container {
-        padding-top: 2rem;
-    }
-    
-    /* 8. 歡迎頁面專用樣式 */
-    .welcome-container {
-        text-align: center;
-        padding: 50px;
-        border-radius: 15px;
-        background: rgba(255, 255, 255, 0.05);
-        margin-top: 50px;
-    }
-    .welcome-title {
-        font-size: 3rem;
-        font-weight: 700;
-        margin-bottom: 1rem;
-    }
-    .welcome-desc {
-        font-size: 1.2rem;
-        color: #888;
-        margin-bottom: 2rem;
+    /* 深色模式適配 */
+    @media (prefers-color-scheme: dark) {
+        .welcome-title {color: #ddd;}
+        .welcome-desc {color: #aaa;}
     }
 </style>
 """, unsafe_allow_html=True)
@@ -271,7 +227,6 @@ class LiveProcessor(VideoProcessorBase):
     def recv(self, frame):
         try:
             img = frame.to_ndarray(format="bgr24")
-            
             if not hasattr(self, 'session_start_time') or self.session_start_time is None:
                 self.session_start_time = time.time()
             is_warming_up = (time.time() - self.session_start_time) < self.warmup_duration
@@ -287,7 +242,6 @@ class LiveProcessor(VideoProcessorBase):
             cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 2)
 
             self.frame_counter += 1
-            
             if not (self.frame_counter % self.skip_rate == 0):
                 if len(self.cached_rois) > 0:
                     for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
@@ -318,14 +272,12 @@ class LiveProcessor(VideoProcessorBase):
             
             valid_boxes.sort(key=lambda b: b[0])
             self.cached_rois = []
-            
             detected_something = False
             count_id = 1
             
             for (x, y, w, h) in valid_boxes:
                 roi = binary_proc[y:y+h, x:x+w]
                 final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
-                
                 if final_conf > self.min_conf:
                     detected_something = True
                     rx, ry = x + roi_rect[0], y + roi_rect[1]
@@ -361,13 +313,11 @@ class LiveProcessor(VideoProcessorBase):
                     if self.stability_start_time is None: self.stability_start_time = time.time()
                     elapsed = time.time() - self.stability_start_time
                     progress = min(elapsed / STABILITY_DURATION, 1.0)
-                    
                     bar_y = h_f - 20 
                     bar_w = int(600 * progress)
                     color = (0, 255, 255) if progress < 1.0 else (0, 255, 0)
                     cv2.rectangle(display_img, (20, bar_y - 15), (20 + bar_w, bar_y), color, -1)
                     cv2.rectangle(display_img, (20, bar_y - 15), (w_f - 20, bar_y), (255, 255, 255), 2)
-                    
                     if elapsed >= STABILITY_DURATION and detected_something:
                         self.frozen = True
                         self.frozen_frame = display_img.copy()
@@ -489,7 +439,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式
+# 4. 上傳模式 (V98: 增加邊緣過濾)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     file = st.file_uploader("Drop an image here", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
@@ -534,6 +484,11 @@ def run_upload_mode(erosion, dilation, min_conf):
             if w < 10 and h < 10: continue
             if w * h > (img_h * img_w * 0.9): continue
             
+            # [V98 核心修正] 邊緣過濾：如果方框底部太接近圖片邊緣，視為雜訊
+            # img_h - 10 表示只保留距離底部至少 10px 的物件
+            if y + h > img_h - 10: 
+                continue 
+
             roi = processed[y:y+h, x:x+w]
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
             if final_conf > min_conf:
@@ -567,19 +522,17 @@ def run_upload_mode(erosion, dilation, min_conf):
                 st.image(processed, use_container_width=True, caption="BlackHat Vision")
 
 # ==========================================
-# 5. 主程式分流 (含歡迎頁面邏輯)
+# 5. 主程式分流
 # ==========================================
 def main():
     try:
-        # 狀態初始化：判斷是否已進入主程式
+        # 狀態初始化
         if 'page' not in st.session_state:
             st.session_state['page'] = 'welcome'
 
         # --- 歡迎首頁 ---
         if st.session_state['page'] == 'welcome':
-            # 垂直置中佈局技巧
             st.markdown("<br><br>", unsafe_allow_html=True)
-            
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
                 st.markdown("""
@@ -592,16 +545,14 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # 巨大的開始按鈕
                 if st.button("🚀 開始使用 / START", use_container_width=True, type="primary"):
                     st.session_state['page'] = 'app'
-                    st.rerun() # 重新執行以載入主程式介面
+                    st.rerun()
 
         # --- 主程式介面 ---
         elif st.session_state['page'] == 'app':
             st.title("HANDWRITING AI")
             
-            # 側邊欄 (進入主程式後才顯示)
             st.sidebar.header("Settings")
             mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
             st.sidebar.divider()
@@ -620,7 +571,6 @@ def main():
                 dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2, help="把線條變粗，用來連接斷掉的筆畫")
                 min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字")
             
-            # 返回首頁按鈕
             if st.sidebar.button("🏠 回到首頁"):
                 st.session_state['page'] = 'welcome'
                 st.rerun()
