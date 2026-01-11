@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V116)", 
+    page_title="Handwriting AI (V117)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -29,9 +29,6 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 # 參數設定
 STABILITY_DURATION = 3.0    
 MOVEMENT_THRESHOLD = 120    
-# [V116] 調整邊距：數值越大，藍色框框越小 (越往中間縮)
-ROI_MARGIN_X = 250 
-ROI_MARGIN_Y = 150 
 SHRINK_PX = 4
 
 RTC_CONFIGURATION = RTCConfiguration(
@@ -298,9 +295,15 @@ class LiveProcessor(VideoProcessorBase):
             display_img = img.copy()
             h_f, w_f = img.shape[:2]
             
-            roi_rect = [ROI_MARGIN_X, ROI_MARGIN_Y, w_f - 2*ROI_MARGIN_X, h_f - 2*ROI_MARGIN_Y]
+            # [V117] 動態 ROI：不管畫面多大，都取中間 60%
+            roi_w = int(w_f * 0.6)
+            roi_h = int(h_f * 0.6)
+            roi_x = (w_f - roi_w) // 2
+            roi_y = (h_f - roi_h) // 2
+            
+            roi_rect = [roi_x, roi_y, roi_w, roi_h]
             roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
-            cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 2)
+            cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 3)
 
             if (current_time - self.last_process_time) < self.process_interval:
                 if len(self.cached_rois) > 0:
@@ -399,7 +402,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v116-cam", 
+            key="v117-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
