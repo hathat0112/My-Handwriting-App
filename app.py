@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V112)", 
+    page_title="Handwriting AI (V113)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,8 +27,8 @@ from sklearn.svm import SVC
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # 參數設定
-STABILITY_DURATION = 1.5 # 需穩定 1.5 秒
-MOVEMENT_THRESHOLD = 150 # 放寬一點晃動容許值
+STABILITY_DURATION = 1.5    
+MOVEMENT_THRESHOLD = 120    
 ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
@@ -118,6 +118,7 @@ except Exception as e:
     st.error(f"❌ 模型載入失敗: {e}")
     st.stop()
 
+# 雙層處理邏輯
 def get_contour_mask(binary_img, erosion):
     res = binary_img.copy()
     if erosion > 0:
@@ -134,12 +135,36 @@ def get_prediction_img(binary_img, dilation):
         res = cv2.dilate(res, kernel_dil, iterations=dilation)
     return res
 
+# [V113 新增] 複雜度檢查：如果內部結構太複雜(太多洞)，就視為塗鴉
+def check_complexity(roi):
+    # 尋找內部的輪廓
+    cnts, hierarchy = cv2.findContours(roi, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # 如果只有一個輪廓(自己)，那是 OK 的
+    if len(cnts) <= 1: return True
+    
+    # 計算有幾個「子輪廓」(被包在裡面的洞)
+    # hierarchy[0] 是一個陣列，每個元素是 [Next, Previous, First_Child, Parent]
+    # 我們計算有多少個輪廓是有 Parent 的
+    internal_shapes = 0
+    if hierarchy is not None:
+        for h in hierarchy[0]:
+            if h[3] != -1: # 有 Parent，代表它是內部的洞
+                internal_shapes += 1
+    
+    # 數字 8 最多只有 2 個洞。如果超過 2 個洞 (例如笑臉有眼睛嘴巴)，就視為塗鴉
+    if internal_shapes > 2:
+        return False # 太複雜，不是數字
+        
+    return True # 通過檢查
+
 def merge_nearby_boxes(boxes, distance_threshold=20):
     if not boxes: return []
     rects = []
     for (x, y, w, h) in boxes:
         rects.append([x, y, x+w, y+h])
     rects = np.array(rects)
+    
     while True:
         merged = False
         new_rects = []
@@ -162,6 +187,7 @@ def merge_nearby_boxes(boxes, distance_threshold=20):
             new_rects.append([x1, y1, x2, y2])
         if not merged: break
         rects = np.array(new_rects)
+
     final_boxes = []
     for (x1, y1, x2, y2) in rects:
         final_boxes.append((x1, y1, x2-x1, y2-y1))
@@ -175,12 +201,14 @@ def preprocess_input(roi):
     canvas = np.zeros((28, 28), dtype=np.uint8)
     y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
     canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
+    
     m = cv2.moments(canvas, True)
     if m['m00'] > 0.1:
         cX, cY = m['m10'] / m['m00'], m['m01'] / m['m00']
         tX, tY = 14.0 - cX, 14.0 - cY
         M = np.float32([[1, 0, tX], [0, 1, tY]])
         canvas = cv2.warpAffine(canvas, M, (28, 28), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        
     cnn_in = canvas.reshape(1, 28, 28, 1).astype('float32') / 255.0
     flat_in = canvas.reshape(1, 784).astype('float32') / 255.0
     return cnn_in, flat_in
@@ -238,7 +266,7 @@ def ensemble_predict(roi, min_conf, strict_mode=False):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (V112: HD + 進度條)
+# 2. 鏡頭模式
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -289,33 +317,6 @@ class LiveProcessor(VideoProcessorBase):
             roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
             cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 2)
 
-            # [V112] 繪製進度條邏輯
-            if self.stability_start_time is not None and not is_warming_up:
-                elapsed = current_time - self.stability_start_time
-                progress = min(elapsed / STABILITY_DURATION, 1.0)
-                
-                # 繪製進度條背景
-                bar_x = roi_rect[0]
-                bar_y = roi_rect[1] + roi_rect[3] + 20
-                bar_w = roi_rect[2]
-                bar_h = 15
-                cv2.rectangle(display_img, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (50, 50, 50), -1)
-                
-                # 繪製進度 (黃色 -> 綠色)
-                fill_w = int(bar_w * progress)
-                bar_color = (0, 255, 255) # 黃色
-                if progress >= 1.0: bar_color = (0, 255, 0) # 綠色
-                
-                cv2.rectangle(display_img, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), bar_color, -1)
-                
-                # 文字提示
-                status_text = "Scanning..." if progress < 1.0 else "Captured!"
-                cv2.putText(display_img, status_text, (bar_x, bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, bar_color, 2)
-
-                if progress >= 1.0 and len(self.cached_rois) > 0:
-                    self.frozen = True
-                    self.frozen_frame = display_img.copy()
-
             if (current_time - self.last_process_time) < self.process_interval:
                 if len(self.cached_rois) > 0:
                     for (dx, dy, dw, dh, txt, box_color, dashed) in self.cached_rois:
@@ -330,7 +331,6 @@ class LiveProcessor(VideoProcessorBase):
             if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
             gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
-            # [V112] 配合高解析度，稍微加大模糊半徑
             blur = cv2.GaussianBlur(gray, (5, 5), 0) 
             binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
             
@@ -356,21 +356,24 @@ class LiveProcessor(VideoProcessorBase):
             merged_boxes.sort(key=lambda b: b[0])
             self.cached_rois = []
             
-            # 檢查晃動
             detected_something = False
             for (x, y, w, h) in merged_boxes:
-                detected_something = True
                 pad = self.erosion * 2
                 roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
                                max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
                 
                 if roi.size == 0: continue
                 
+                # [V113] 檢查結構複雜度
+                if not check_complexity(roi):
+                    continue # 太複雜，跳過
+
                 final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf, self.strict_mode)
                 
                 rx, ry = x + roi_rect[0], y + roi_rect[1]
                 
                 if final_lbl != -1 and final_conf > self.min_conf:
+                    detected_something = True
                     box_color = (0, 255, 0)
                     self.cached_rois.append((rx, ry, w, h, str(final_lbl), box_color, False))
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
@@ -380,31 +383,47 @@ class LiveProcessor(VideoProcessorBase):
                     self.cached_rois.append((rx, ry, w, h, "?", box_color, True))
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 1)
 
-            # 更新穩定度計時器
             if detected_something:
-                # 簡單的晃動偵測：如果框的數量變了，或者位置變太多，就重置時間
                 if self.stability_start_time is None:
                     self.stability_start_time = current_time
             else:
                 self.stability_start_time = None
+                
+            # 繪製進度條 (同上版)
+            if self.stability_start_time is not None and not is_warming_up:
+                elapsed = current_time - self.stability_start_time
+                progress = min(elapsed / STABILITY_DURATION, 1.0)
+                bar_x = roi_rect[0]
+                bar_y = roi_rect[1] + roi_rect[3] + 20
+                bar_w = roi_rect[2]
+                bar_h = 15
+                cv2.rectangle(display_img, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (50, 50, 50), -1)
+                fill_w = int(bar_w * progress)
+                bar_color = (0, 255, 255)
+                if progress >= 1.0: bar_color = (0, 255, 0)
+                cv2.rectangle(display_img, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), bar_color, -1)
+                status_text = "Scanning..." if progress < 1.0 else "Captured!"
+                cv2.putText(display_img, status_text, (bar_x, bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, bar_color, 2)
+                if progress >= 1.0 and len(self.cached_rois) > 0:
+                    self.frozen = True
+                    self.frozen_frame = display_img.copy()
 
             return av.VideoFrame.from_ndarray(display_img, format="bgr24")
         except Exception as e:
             return av.VideoFrame.from_ndarray(frame.to_ndarray(format="bgr24"), format="bgr24")
 
 def run_camera_mode(erosion, dilation, min_conf, strict_mode):
-    st.caption("請將數字置於鏡頭中央，藍色框框內。下方出現黃色條時請保持穩定。")
+    st.caption("請將數字置於鏡頭中央，穩定後自動抓拍")
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v112-cam", 
+            key="v113-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
             async_processing=True,
             media_stream_constraints={
                 "video": {
-                    # [V112] 提升畫質到 720p (HD)
                     "width": {"min": 640, "ideal": 1280, "max": 1280},
                     "height": {"min": 480, "ideal": 720, "max": 720},
                     "frameRate": {"max": 30},
@@ -499,6 +518,10 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 
                 if roi.size == 0: continue
                 
+                # [V113] 檢查複雜度
+                if not check_complexity(roi):
+                    continue # 是塗鴉，跳過
+
                 final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
                 
                 if final_lbl != -1 and final_conf > min_conf:
@@ -579,6 +602,9 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             
             if roi.size == 0: continue
             
+            # [V113] 上傳模式也檢查複雜度
+            if not check_complexity(roi): continue
+
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
             if final_lbl != -1 and final_conf > min_conf:
                 valid_boxes_data.append({'rect': (x,y,w,h), 'lbl': final_lbl, 'conf': final_conf, 'details': details})
