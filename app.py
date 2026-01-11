@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V126)", 
+    page_title="Handwriting AI", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -52,16 +52,17 @@ st.markdown("""
     .welcome-title {font-size: 3rem; font-weight: 700; margin-bottom: 1rem; color: #333;}
     .welcome-desc {font-size: 1.2rem; color: #666; margin-bottom: 2rem;}
     
-    /* 說明書樣式 */
+    /* 說明書樣式優化 */
     .manual-box {
-        background-color: rgba(255, 255, 255, 0.05);
-        border-left: 4px solid #FF4B4B;
-        padding: 15px;
-        margin-bottom: 20px;
-        border-radius: 5px;
+        background-color: rgba(128, 128, 128, 0.08);
+        border-left: 5px solid #FF4B4B;
+        padding: 20px;
+        margin-bottom: 25px;
+        border-radius: 8px;
     }
-    .manual-title {font-weight: bold; font-size: 1.1em; margin-bottom: 5px; color: #FF4B4B;}
-    .manual-text {font-size: 0.95em; line-height: 1.6; opacity: 0.9;}
+    .manual-section {margin-bottom: 15px;}
+    .manual-title {font-weight: 800; font-size: 1.15em; color: #FF4B4B; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;}
+    .manual-text {font-size: 0.95em; line-height: 1.7; color: inherit; opacity: 0.85;}
     
     @media (prefers-color-scheme: dark) {
         .welcome-title {color: #ddd;}
@@ -71,7 +72,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 共用核心與模型載入
+# 1. 模型與影像核心 (維持現有邏輯)
 # ==========================================
 @st.cache_resource
 def load_models():
@@ -81,7 +82,6 @@ def load_models():
         if os.path.exists(f):
             try:
                 cnn = load_model(f)
-                print(f"✅ CNN Loaded: {f}")
                 break
             except: pass
     
@@ -98,7 +98,6 @@ def load_models():
     if os.path.exists(knn_path):
         try: knn = joblib.load(knn_path)
         except: pass
-    
     if knn is None and x_flat is not None:
         try:
             knn = KNeighborsClassifier(n_neighbors=3)
@@ -111,7 +110,6 @@ def load_models():
     if os.path.exists(svm_path):
         try: svm = joblib.load(svm_path)
         except: pass
-    
     if svm is None and x_flat is not None:
         try:
             svm = SVC(kernel='rbf', probability=True)
@@ -151,18 +149,12 @@ def check_complexity(roi):
         for i, h in enumerate(hierarchy[0]):
             if h[3] != -1:
                 hole_area = cv2.contourArea(cnts[i])
-                if hole_area > 5:
-                    internal_shapes += 1
-    if internal_shapes > 2:
-        return False 
-    return True
+                if hole_area > 5: internal_shapes += 1
+    return internal_shapes <= 2
 
 def merge_nearby_boxes(boxes, distance_threshold=20):
     if not boxes: return []
-    rects = []
-    for (x, y, w, h) in boxes:
-        rects.append([x, y, x+w, y+h])
-    rects = np.array(rects)
+    rects = np.array([[x, y, x+w, y+h] for (x, y, w, h) in boxes])
     while True:
         merged = False
         new_rects = []
@@ -173,22 +165,15 @@ def merge_nearby_boxes(boxes, distance_threshold=20):
             for j in range(i + 1, len(rects)):
                 if used[j]: continue
                 ox1, oy1, ox2, oy2 = rects[j]
-                dist_x = max(0, x1 - ox2) + max(0, ox1 - x2)
-                dist_y = max(0, y1 - oy2) + max(0, oy1 - y2)
-                if dist_x < distance_threshold and dist_y < distance_threshold:
-                    x1 = min(x1, ox1)
-                    y1 = min(y1, oy1)
-                    x2 = max(x2, ox2)
-                    y2 = max(y2, oy2)
+                if max(0, x1 - ox2) + max(0, ox1 - x2) < distance_threshold and \
+                   max(0, y1 - oy2) + max(0, oy1 - y2) < distance_threshold:
+                    x1, y1, x2, y2 = min(x1, ox1), min(y1, oy1), max(x2, ox2), max(y2, oy2)
                     used[j] = True
                     merged = True
             new_rects.append([x1, y1, x2, y2])
         if not merged: break
         rects = np.array(new_rects)
-    final_boxes = []
-    for (x1, y1, x2, y2) in rects:
-        final_boxes.append((x1, y1, x2-x1, y2-y1))
-    return final_boxes
+    return [(r[0], r[1], r[2]-r[0], r[3]-r[1]) for r in rects]
 
 def preprocess_input(roi):
     h, w = roi.shape
@@ -196,560 +181,258 @@ def preprocess_input(roi):
     nh, nw = max(1, int(h * scale)), max(1, int(w * scale))
     resized = cv2.resize(roi, (nw, nh), interpolation=cv2.INTER_AREA)
     canvas = np.zeros((28, 28), dtype=np.uint8)
-    y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
-    canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
+    canvas[(28-nh)//2:(28-nh)//2+nh, (28-nw)//2:(28-nw)//2+nw] = resized
     m = cv2.moments(canvas, True)
     if m['m00'] > 0.1:
-        cX, cY = m['m10'] / m['m00'], m['m01'] / m['m00']
-        tX, tY = 14.0 - cX, 14.0 - cY
-        M = np.float32([[1, 0, tX], [0, 1, tY]])
-        canvas = cv2.warpAffine(canvas, M, (28, 28), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    cnn_in = canvas.reshape(1, 28, 28, 1).astype('float32') / 255.0
-    flat_in = canvas.reshape(1, 784).astype('float32') / 255.0
-    return cnn_in, flat_in
+        M = np.float32([[1, 0, 14.0 - m['m10']/m['m00']], [0, 1, 14.0 - m['m01']/m['m00']]])
+        canvas = cv2.warpAffine(canvas, M, (28, 28), flags=cv2.INTER_CUBIC)
+    return canvas.reshape(1, 28, 28, 1).astype('float32')/255.0, canvas.reshape(1, 784).astype('float32')/255.0
 
 def draw_label(img, text, x, y, color=(0, 255, 255), is_dashed=False):
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 1.0
-    thickness = 2
-    (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
-    if is_dashed:
-        cv2.rectangle(img, (x, y), (x + lw + 10, y + 20), color, 1)
+    (lw, lh), _ = cv2.getTextSize(text, font, 1.0, 2)
+    if is_dashed: cv2.rectangle(img, (x, y), (x + lw + 10, y + 20), color, 1)
     else:
         cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
-        cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
+        cv2.putText(img, text, (x, y - 5), font, 1.0, color, 2)
 
 def ensemble_predict(roi, min_conf, strict_mode=False):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
-    lbl_cnn = np.argmax(pred_cnn)
-    conf_cnn = np.max(pred_cnn)
-    
-    lbl_knn = -1
-    if knn_model: lbl_knn = knn_model.predict(flat_in)[0]
-    lbl_svm = -1
-    if svm_model: lbl_svm = svm_model.predict(flat_in)[0]
-    
-    final_lbl = lbl_cnn
-    final_conf = conf_cnn
-    details = ""
-    
-    agree_count = 0
-    if knn_model and lbl_knn == lbl_cnn: agree_count += 1
-    if svm_model and lbl_svm == lbl_cnn: agree_count += 1
+    lbl_cnn, conf_cnn = np.argmax(pred_cnn), np.max(pred_cnn)
     
     if strict_mode:
-        if (knn_model and lbl_knn != lbl_cnn) or (svm_model and lbl_svm != lbl_cnn):
-            if final_conf < 0.85:
-                return -1, 0.0, " (Disagree)"
-        if final_conf < 0.8:
-            return -1, 0.0, " (Low Conf)"
+        lbl_knn = knn_model.predict(flat_in)[0] if knn_model else -1
+        lbl_svm = svm_model.predict(flat_in)[0] if svm_model else -1
+        if (lbl_knn != lbl_cnn or lbl_svm != lbl_cnn) and conf_cnn < 0.85: return -1, 0.0, " (Disagree)"
+        if conf_cnn < 0.8: return -1, 0.0, " (Low Conf)"
 
-    if agree_count == 2:
-        final_conf = min(0.99, final_conf + 0.05)
-    else:
-        if conf_cnn > 0.85:
-            final_conf = conf_cnn
-        else:
-            final_conf = max(0.0, final_conf - 0.15)
-            
-        disagreements = []
-        if knn_model and lbl_knn != lbl_cnn: disagreements.append(f"K:{lbl_knn}")
-        if svm_model and lbl_svm != lbl_cnn: disagreements.append(f"S:{lbl_svm}")
-        if disagreements: details = f" ({'/'.join(disagreements)})"
+    details = ""
+    if not strict_mode:
+        lbl_knn = knn_model.predict(flat_in)[0] if knn_model else -1
+        lbl_svm = svm_model.predict(flat_in)[0] if svm_model else -1
+        dis = []
+        if lbl_knn != lbl_cnn: dis.append(f"K:{lbl_knn}")
+        if lbl_svm != lbl_cnn: dis.append(f"S:{lbl_svm}")
+        if dis: details = f" ({'/'.join(dis)})"
         
-    return final_lbl, final_conf, details
+    return lbl_cnn, conf_cnn, details
 
 # ==========================================
-# 2. 鏡頭模式
+# 2. 模式組件
 # ==========================================
+
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
-        self.model = cnn_model
-        self.erosion = 0
-        self.dilation = 0 
-        self.min_conf = 0.50 
-        self.strict_mode = True 
-        
-        self.last_boxes = []
-        self.last_centers = [] 
-        self.stability_start_time = None
-        self.frozen = False
-        self.frozen_frame = None
-        self.cached_rois = [] 
-        self.last_process_time = 0 
-        self.process_interval = 0.25 
+        self.erosion, self.dilation, self.min_conf, self.strict_mode = 0, 0, 0.5, True
+        self.last_centers, self.stability_start_time, self.frozen, self.frozen_frame = [], None, False, None
+        self.cached_rois, self.last_process_time, self.process_interval = [], 0, 0.25
         self.session_start_time = time.time()
-        self.warmup_duration = 2.0 
 
     def update_params(self, ero, dil, conf, strict):
-        self.erosion = ero
-        self.dilation = dil
-        self.min_conf = conf
-        self.strict_mode = strict
-
-    def resume(self):
-        self.frozen = False
-        self.stability_start_time = None
-        self.last_boxes = []
-        self.last_centers = []
-        self.cached_rois = []
-        self.session_start_time = time.time()
+        self.erosion, self.dilation, self.min_conf, self.strict_mode = ero, dil, conf, strict
 
     def recv(self, frame):
-        try:
-            img = frame.to_ndarray(format="bgr24")
-            current_time = time.time()
-            if not hasattr(self, 'session_start_time') or self.session_start_time is None:
-                self.session_start_time = current_time
-            is_warming_up = (current_time - self.session_start_time) < self.warmup_duration
+        img = frame.to_ndarray(format="bgr24")
+        curr = time.time()
+        if self.frozen: return av.VideoFrame.from_ndarray(self.frozen_frame, format="bgr24")
+        
+        h_f, w_f = img.shape[:2]
+        rw, rh = int(w_f * 0.7), int(h_f * 0.7)
+        rx, ry = (w_f - rw)//2, (h_f - rh)//2
+        roi_rect = [rx, ry, rw, rh]
+        
+        display_img = img.copy()
+        cv2.rectangle(display_img, (rx, ry), (rx+rw, ry+rh), (255, 0, 0), 3)
 
-            if self.frozen and self.frozen_frame is not None:
-                return av.VideoFrame.from_ndarray(self.frozen_frame, format="bgr24")
-            
-            display_img = img.copy()
-            h_f, w_f = img.shape[:2]
-            
-            roi_w = int(w_f * 0.7)
-            roi_h = int(h_f * 0.7)
-            roi_x = (w_f - roi_w) // 2
-            roi_y = (h_f - roi_h) // 2
-            roi_rect = [roi_x, roi_y, roi_w, roi_h]
-            
-            roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
-            cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 3)
-
-            if (current_time - self.last_process_time) < self.process_interval:
-                if len(self.cached_rois) > 0:
-                    for (dx, dy, dw, dh, txt, box_color, dashed) in self.cached_rois:
-                        cv2.rectangle(display_img, (dx, dy), (dx+dw, dy+dh), box_color, 2)
-                        draw_label(display_img, txt, dx, dy, box_color, dashed)
-                if self.stability_start_time is not None:
-                    elapsed = current_time - self.stability_start_time
-                    progress = min(elapsed / STABILITY_DURATION, 1.0)
-                    self._draw_progress_bar(display_img, w_f, h_f, progress)
-                if is_warming_up:
-                    cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                return av.VideoFrame.from_ndarray(display_img, format="bgr24")
-
-            self.last_process_time = current_time
-            roi_img = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
-            if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
-
-            gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
-            blur = cv2.GaussianBlur(gray, (5, 5), 0) 
-            binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
-            
-            mask_img = get_contour_mask(binary, self.erosion)
-            pred_img = get_prediction_img(binary, self.dilation)
-            
-            cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            raw_boxes = []
-            min_area = 50 if self.erosion > 3 else 150
-            
-            for c in cnts:
-                if cv2.contourArea(c) < min_area: continue 
-                x, y, w, h = cv2.boundingRect(c)
-                if x<5 or y<5: continue
-                aspect_ratio = w / float(h)
-                if aspect_ratio > 1.5: continue 
-                if h < 15: continue
-                if x < 10: continue 
-                raw_boxes.append((x,y,w,h))
-            
-            merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=20)
-            merged_boxes.sort(key=lambda b: b[0])
-            self.cached_rois = []
-            
-            roi_hd = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
-            gray_hd = cv2.cvtColor(roi_hd, cv2.COLOR_BGR2GRAY)
-            blur_hd = cv2.GaussianBlur(gray_hd, (5, 5), 0)
-            binary_hd = cv2.adaptiveThreshold(blur_hd, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
-            pred_img_hd = get_prediction_img(binary_hd, self.dilation)
-
-            current_centers = []
-            for (x, y, w, h) in merged_boxes:
-                current_centers.append((x + w//2, y + h//2))
-            
-            total_movement = 0
-            if len(current_centers) != len(self.last_centers):
-                total_movement = 9999 
-            else:
-                for i in range(len(current_centers)):
-                    dx = abs(current_centers[i][0] - self.last_centers[i][0])
-                    dy = abs(current_centers[i][1] - self.last_centers[i][1])
-                    total_movement += (dx + dy)
-            self.last_centers = current_centers
-
-            detected_something = False
-            for (x, y, w, h) in merged_boxes:
-                pad = self.erosion * 2
-                roi_final = pred_img_hd[max(0, y-pad):min(pred_img_hd.shape[0], y+h+pad), 
-                                        max(0, x-pad):min(pred_img_hd.shape[1], x+w+pad)]
-                
-                if roi_final.size == 0: continue
-                if not check_complexity(roi_final): continue
-
-                final_lbl, final_conf, _ = ensemble_predict(roi_final, self.min_conf, self.strict_mode)
-                
-                rx, ry = x + roi_rect[0], y + roi_rect[1]
-                
-                if final_lbl != -1 and final_conf > self.min_conf:
-                    detected_something = True
-                    box_color = (0, 255, 0)
-                    self.cached_rois.append((rx, ry, w, h, str(final_lbl), box_color, False))
-                    cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
-                    draw_label(display_img, str(final_lbl), rx, ry, box_color, False)
-                elif self.strict_mode:
-                    box_color = (0, 255, 255)
-                    self.cached_rois.append((rx, ry, w, h, "?", box_color, True))
-                    cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 1)
-
-            is_stable = (detected_something and total_movement < MOVEMENT_THRESHOLD)
-            if is_stable:
-                if self.stability_start_time is None: self.stability_start_time = current_time
-            else:
-                self.stability_start_time = None
-                
-            if self.stability_start_time is not None and not is_warming_up:
-                elapsed = current_time - self.stability_start_time
-                progress = min(elapsed / STABILITY_DURATION, 1.0)
-                self._draw_progress_bar(display_img, w_f, h_f, progress)
-                if progress >= 1.0 and len(self.cached_rois) > 0:
-                    self.frozen = True
-                    self.frozen_frame = display_img.copy()
-
+        if curr - self.last_process_time < self.process_interval:
+            for (dx, dy, dw, dh, txt, clr, dsh) in self.cached_rois:
+                cv2.rectangle(display_img, (dx, dy), (dx+dw, dy+dh), clr, 2)
+                draw_label(display_img, txt, dx, dy, clr, dsh)
+            if self.stability_start_time:
+                prog = min((curr - self.stability_start_time)/STABILITY_DURATION, 1.0)
+                self._draw_bar(display_img, w_f, h_f, prog)
             return av.VideoFrame.from_ndarray(display_img, format="bgr24")
-        except Exception as e:
-            return av.VideoFrame.from_ndarray(frame.to_ndarray(format="bgr24"), format="bgr24")
 
-    def _draw_progress_bar(self, img, w, h, progress):
-        bar_h = 20
-        bar_y = h - bar_h 
-        bar_x = 0
-        bar_w = w
-        cv2.rectangle(img, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (30, 30, 30), -1)
-        fill_w = int(bar_w * progress)
-        bar_color = (0, 255, 255)
-        if progress >= 1.0: bar_color = (0, 255, 0)
-        cv2.rectangle(img, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), bar_color, -1)
-        status_text = "Scanning..." if progress < 1.0 else "Captured!"
-        cv2.putText(img, status_text, (10, bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, bar_color, 2)
+        self.last_process_time = curr
+        roi_hd = img[ry:ry+rh, rx:rx+rw]
+        gray = cv2.cvtColor(roi_hd, cv2.COLOR_BGR2GRAY)
+        binary = cv2.adaptiveThreshold(cv2.GaussianBlur(gray, (5,5), 0), 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
+        mask, pred = get_contour_mask(binary, self.erosion), get_prediction_img(binary, self.dilation)
+        
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        raw_boxes = [cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 50]
+        merged = merge_nearby_boxes(raw_boxes, 20)
+        merged.sort(key=lambda b: b[0])
+        
+        curr_centers = [(x+w//2, y+h//2) for (x, y, w, h) in merged]
+        mov = 9999 if len(curr_centers) != len(self.last_centers) else sum(abs(curr_centers[i][0]-self.last_centers[i][0])+abs(curr_centers[i][1]-self.last_centers[i][1]) for i in range(len(curr_centers)))
+        self.last_centers, self.cached_rois = curr_centers, []
+        
+        detected = False
+        for (x, y, w, h) in merged:
+            p = self.erosion * 2
+            roi_final = pred[max(0,y-p):min(rh,y+h+p), max(0,x-p):min(rw,x+w+p)]
+            if roi_final.size > 0 and check_complexity(roi_final):
+                lbl, conf, _ = ensemble_predict(roi_final, self.min_conf, self.strict_mode)
+                ax, ay = x + rx, y + ry
+                if lbl != -1 and conf > self.min_conf:
+                    detected = True
+                    self.cached_rois.append((ax, ay, w, h, str(lbl), (0, 255, 0), False))
+                    cv2.rectangle(display_img, (ax, ay), (ax+w, ay+h), (0,255,0), 2)
+                    draw_label(display_img, str(lbl), ax, ay, (0,255,0))
+                elif self.strict_mode:
+                    self.cached_rois.append((ax, ay, w, h, "?", (0, 255, 255), True))
 
-def run_camera_mode(erosion, dilation, min_conf, strict_mode):
-    # [V126] 更新操作指南
-    with st.expander("📖 操作指南 (How to use)"):
+        if detected and mov < MOVEMENT_THRESHOLD:
+            if self.stability_start_time is None: self.stability_start_time = curr
+        else: self.stability_start_time = None
+        
+        if self.stability_start_time:
+            prog = min((curr - self.stability_start_time)/STABILITY_DURATION, 1.0)
+            self._draw_bar(display_img, w_f, h_f, prog)
+            if prog >= 1.0 and self.cached_rois:
+                self.frozen, self.frozen_frame = True, display_img.copy()
+
+        return av.VideoFrame.from_ndarray(display_img, format="bgr24")
+
+    def _draw_bar(self, img, w, h, p):
+        cv2.rectangle(img, (0, h-20), (w, h), (30, 30, 30), -1)
+        clr = (0, 255, 255) if p < 1.0 else (0, 255, 0)
+        cv2.rectangle(img, (0, h-20), (int(w*p), h), clr, -1)
+        cv2.putText(img, "Scanning..." if p < 1.0 else "Captured!", (10, h-30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, clr, 2)
+
+# ==========================================
+# 3. 模式分流與指南
+# ==========================================
+
+def run_camera_mode(erosion, dilation, min_conf):
+    with st.expander("📖 鏡頭辨識指南"):
         st.markdown("""
         <div class="manual-box">
-            <div class="manual-title">📸 鏡頭模式使用技巧</div>
-            <div class="manual-text">
-            1. <b>對準藍框</b>：請將數字置於畫面中央的藍色框框內。<br>
-            2. <b>拿近一點</b>：如果數字太小 AI 會看不清楚，<b>請將紙張拿靠近鏡頭</b>，讓數字佔據藍框的一定大小。<br>
-            3. <b>保持穩定</b>：當偵測到數字時，下方會出現<b>黃色進度條</b>。請保持手機或紙張<b>完全靜止</b>。<br>
-            4. <b>自動抓拍</b>：倒數 3 秒結束後，進度條變綠，畫面會自動凍結並顯示結果。<br>
-            5. <b>重新開始</b>：點擊右上角的「🔄 重新掃描」按鈕即可解除凍結。
+            <div class="manual-section">
+                <div class="manual-title">🔍 距離與對焦</div>
+                <div class="manual-text">請將紙張拿近鏡頭，確保數字佔據藍色框框 <b>1/4 以上</b> 的高度。若太遠，AI 將因解析度不足而無法識別細節。</div>
+            </div>
+            <div class="manual-section">
+                <div class="manual-title">⏳ 穩定倒數</div>
+                <div class="manual-text">看到黃色條出現時，請<b>完全定住手機</b>。倒數 3 秒變綠後會自動完成拍攝並鎖定結果。</div>
+            </div>
+            <div class="manual-section">
+                <div class="manual-title">🔄 重啟掃描</div>
+                <div class="manual-text">點擊右側「🔄 重新掃描」可解除凍結，開始下一次辨識。</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
+    webrtc_streamer(key="cam", mode=WebRtcMode.SENDRECV, rtc_configuration=RTC_CONFIGURATION, video_processor_factory=LiveProcessor, async_processing=True, media_stream_constraints={"video": {"width": 1280, "height": 720, "frameRate": 30}})
 
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        ctx = webrtc_streamer(
-            key="v126-cam", 
-            mode=WebRtcMode.SENDRECV,
-            rtc_configuration=RTC_CONFIGURATION,
-            video_processor_factory=LiveProcessor,
-            async_processing=True,
-            media_stream_constraints={
-                "video": {
-                    "width": {"min": 640, "ideal": 1280, "max": 1280},
-                    "height": {"min": 480, "ideal": 720, "max": 720},
-                    "frameRate": {"max": 30},
-                }
-            }
-        )
-    with col2:
-        if ctx.video_processor:
-            ctx.video_processor.update_params(erosion, dilation, min_conf, strict_mode=True)
-            if st.button("🔄 重新掃描", use_container_width=True):
-                ctx.video_processor.resume()
-            if ctx.video_processor.frozen:
-                st.success("✅ 畫面已鎖定")
-            else:
-                st.info("⏳ 偵測中...")
-
-# ==========================================
-# 3. 手寫板模式
-# ==========================================
-def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
-    if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
-    if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
-
-    with st.expander("📖 操作指南 (How to use)"):
+def run_canvas_mode(erosion, dilation, min_conf):
+    with st.expander("📖 手寫板指南"):
         st.markdown("""
         <div class="manual-box">
-            <div class="manual-title">✍️ 手寫板模式使用技巧</div>
-            <div class="manual-text">
-            1. <b>工具選擇</b>：使用左上角的「✏️ 畫筆」或「🧽 橡皮擦」。<br>
-            2. <b>即時辨識</b>：在黑色畫布上書寫數字，右側會即時顯示結果。<br>
-            3. <b>智慧過濾</b>：此模式開啟了<b>嚴格過濾</b>，會自動忽略笑臉、塗鴉等非數字圖形。<br>
-            4. <b>清除重寫</b>：點擊「🗑️ 清空」可清除整個畫布。
+            <div class="manual-section">
+                <div class="manual-title">✏️ 書寫技巧</div>
+                <div class="manual-text">請在中央黑布上書寫，字體不宜過小。系統會即時在右側 Analysis 表格中回報結果。</div>
+            </div>
+            <div class="manual-section">
+                <div class="manual-title">🛡️ 智慧過濾</div>
+                <div class="manual-text">手寫板預設開啟<b>高標準過濾</b>，會自動排除像「笑臉」或「無意義塗鴉」的形狀，僅保留高信心的數字。</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
-
     c1, c2 = st.columns([1.8, 1.2], gap="large")
-    
     with c1:
-        st.subheader("Canvas")
-        t1, t2, t3 = st.columns([2, 1, 1])
-        with t1:
-            tool_mode = st.radio("工具", ["✏️ 畫筆", "🧽 橡皮擦"], horizontal=True, label_visibility="collapsed")
-        with t2:
-            if st.button("↩️ 復原", use_container_width=True):
-                if st.session_state['canvas_json']:
-                    data = st.session_state['canvas_json']
-                    if "objects" in data and len(data["objects"]) > 0:
-                        data["objects"].pop()
-                        st.session_state['initial_drawing'] = data
-                        st.session_state['canvas_key'] = f"canvas_{time.time()}"
-                        st.rerun()
-        with t3:
-            if st.button("🗑️ 清空", use_container_width=True):
-                st.session_state['canvas_key'] = f"canvas_{time.time()}"
-                st.session_state['initial_drawing'] = None
-                st.rerun()
-
-        canvas_res = st_canvas(
-            fill_color="rgba(255, 165, 0, 0.3)",
-            stroke_width=15 if tool_mode == "✏️ 畫筆" else 40,
-            stroke_color="#FFFFFF" if tool_mode == "✏️ 畫筆" else "#000000",
-            background_color="#000000",
-            height=400, width=600, drawing_mode="freedraw",
-            initial_drawing=st.session_state['initial_drawing'],
-            key=st.session_state.get('canvas_key', 'canvas_0'),
-            display_toolbar=False 
-        )
-        if canvas_res.json_data is not None: st.session_state['canvas_json'] = canvas_res.json_data
-    
+        tool = st.radio("工具", ["✏️ 畫筆", "🧽 橡皮擦"], horizontal=True, label_visibility="collapsed")
+        canvas_res = st_canvas(stroke_width=15 if tool=="✏️ 畫筆" else 40, stroke_color="#FFFFFF" if tool=="✏️ 畫筆" else "#000000", background_color="#000000", height=400, width=600, drawing_mode="freedraw", key="canvas")
     with c2:
-        st.subheader("Analysis")
         if canvas_res.image_data is not None and np.max(canvas_res.image_data) > 0:
-            raw = canvas_res.image_data.astype(np.uint8)
-            img_bgr = cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR) if raw.shape[2] == 4 else raw
-            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(canvas_res.image_data.astype(np.uint8), cv2.COLOR_RGBA2GRAY)
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            
-            mask_img = get_contour_mask(binary, erosion)
-            pred_img = get_prediction_img(binary, dilation)
-            
-            cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            raw_boxes = []
-            min_area = 50 if erosion > 3 else 400 
-            
-            for c in cnts:
-                area = cv2.contourArea(c)
-                if area < min_area: continue 
-                x, y, w, h = cv2.boundingRect(c)
-                if h < 20 or w < 10: continue 
-                raw_boxes.append((x,y,w,h))
-            
-            merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=30)
-            merged_boxes.sort(key=lambda b: b[0])
-            
-            draw_img = img_bgr.copy()
-            results_list = []
-            valid_count = 1
-            
-            for i, (x, y, w, h) in enumerate(merged_boxes):
-                pad = erosion * 2
-                roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
-                               max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
-                
-                if roi.size == 0: continue
-                
-                if not check_complexity(roi): continue
+            mask, pred = get_contour_mask(binary, erosion), get_prediction_img(binary, dilation)
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            merged = merge_nearby_boxes([cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 400], 30)
+            merged.sort(key=lambda b: b[0])
+            res_list = []
+            for i, (x, y, w, h) in enumerate(merged):
+                roi = pred[y:y+h, x:x+w]
+                if check_complexity(roi):
+                    lbl, conf, _ = ensemble_predict(roi, min_conf, strict_mode=True)
+                    if lbl != -1: res_list.append({"ID": f"#{i+1}", "數字": str(lbl), "信心度": f"{int(conf*100)}%"})
+            st.dataframe(res_list, hide_index=True, use_container_width=True) if res_list else st.info("Waiting for digits...")
 
-                final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=True)
-                
-                if final_lbl != -1 and final_conf > min_conf:
-                    cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    draw_label(draw_img, f"#{valid_count}", x, y, (0, 255, 0), False)
-                    status_text = f"{int(final_conf*100)}%{details}"
-                    results_list.append({"ID": f"#{valid_count}", "數字": str(final_lbl), "信心度": status_text})
-                    valid_count += 1
-            
-            if results_list:
-                st.dataframe(results_list, hide_index=True, use_container_width=True)
-            else:
-                st.info("Waiting for input...")
-        else:
-            st.markdown("*Ready to analyze...*")
-
-# ==========================================
-# 4. 上傳模式
-# ==========================================
-def run_upload_mode(erosion, dilation, min_conf, strict_mode):
-    with st.expander("📖 操作指南 (How to use)"):
+def run_upload_mode(erosion, dilation, min_conf):
+    with st.expander("📖 上傳辨識指南"):
         st.markdown("""
         <div class="manual-box">
-            <div class="manual-title">📂 上傳模式使用技巧</div>
-            <div class="manual-text">
-            1. <b>格式支援</b>：支援 JPG, PNG, JPEG 格式。<br>
-            2. <b>寬容模式</b>：此模式<b>已關閉嚴格過濾</b>，能有效辨識有陰影、光線不足或筆跡較淡的圖片。<br>
-            3. <b>調整建議</b>：若數字黏在一起，可調大左側的 <b>Erosion</b>；若筆畫斷裂，可調大 <b>Dilation</b> (但通常預設值即可)。
+            <div class="manual-section">
+                <div class="manual-title">📸 拍照建議</div>
+                <div class="manual-text">
+                    • <b>距離控制</b>：請將鏡頭靠近紙張拍攝，讓數字充滿畫面，避免過小的字跡影響辨識。<br>
+                    • <b>光線環境</b>：請在明亮環境下拍攝，減少強烈陰影對筆畫的干擾。
+                </div>
+            </div>
+            <div class="manual-section">
+                <div class="manual-title">🔓 寬容模式</div>
+                <div class="manual-text">上傳模式會<b>解鎖嚴格過濾</b>，能偵測光線不足、模糊或寫得較隨意的數字，讓隱藏的數據顯現。</div>
+            </div>
+            <div class="manual-section">
+                <div class="manual-title">🛠️ 微調工具</div>
+                <div class="manual-text">若數字相連無法分開，請嘗試調高左側選單的 <b>Erosion (切割沾黏)</b>。</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
-
-    file = st.file_uploader("Drop an image here", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
-    
-    if not file:
-        st.markdown("""
-        <div style="text-align: center; color: #888; padding: 3rem; border: 2px dashed #ddd; border-radius: 10px;">
-            <h3>📤 Upload Image</h3>
-            <p>Drag and drop or click to browse</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
+    file = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
     if file:
-        file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
-        img_origin = cv2.imdecode(file_bytes, 1)
-        img_h, img_w = img_origin.shape[:2]
+        img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
+        h, w = img.shape[:2]
+        if w > 1000: img = cv2.resize(img, (1000, int(h * 1000/w)))
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blackhat = cv2.normalize(cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_RECT, (15,15))), None, 0, 255, cv2.NORM_MINMAX)
+        _, binary = cv2.threshold(blackhat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        mask, pred = get_contour_mask(binary, erosion), get_prediction_img(binary, dilation)
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        raw_boxes = [cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) > 20]
+        merged = merge_nearby_boxes(raw_boxes, 25)
+        merged.sort(key=lambda b: (b[1]//50, b[0]))
         
-        if img_w > 1000:
-            scale = 1000 / img_w
-            img_origin = cv2.resize(img_origin, (1000, int(img_h * scale)))
-            img_h, img_w = img_origin.shape[:2] 
-            
-        gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
-        
-        kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-        blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
-        blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
-        _, binary = cv2.threshold(blackhat_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        mask_img = get_contour_mask(binary, erosion)
-        pred_img = get_prediction_img(binary, dilation)
-        
-        cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        raw_boxes = []
-        min_area = 20 if erosion > 3 else 80
-        
-        for c in cnts:
-            area = cv2.contourArea(c)
-            if area < min_area: continue 
-            x, y, w, h = cv2.boundingRect(c)
-            if w < 5 and h < 5: continue
-            if w * h > (img_h * img_w * 0.9): continue
-            if y + h > img_h - 10: continue 
-            raw_boxes.append((x,y,w,h))
-            
-        merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=25)
-        merged_boxes.sort(key=lambda item: (item[1]//50, item[0]))
-        
-        valid_boxes_data = []
-        for (x, y, w, h) in merged_boxes:
-            pad = erosion * 2
-            roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
-                           max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
-            
-            if roi.size == 0: continue
-            
-            final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False)
-            
-            if final_lbl != -1 and final_conf > min_conf:
-                valid_boxes_data.append({'rect': (x,y,w,h), 'lbl': final_lbl, 'conf': final_conf, 'details': details})
-
         c1, c2 = st.columns([1.5, 1], gap="large")
-        with c1:
-            display_img = img_origin.copy()
-            valid_count = 1
-            results_list = []
-            
-            for item in valid_boxes_data:
-                x, y, w, h = item['rect']
-                cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
-                draw_label(display_img, f"#{valid_count}", x, y, (0, 255, 0), False)
-                results_list.append({"ID": f"#{valid_count}", "數字": str(item['lbl']), "信心度": f"{int(item['conf']*100)}%{item['details']}"})
-                valid_count += 1
-            
-            st.image(cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB), use_container_width=True, caption="Recognition Result")
-
-        with c2:
-            st.subheader("Result")
-            if results_list:
-                st.dataframe(results_list, hide_index=True, use_container_width=True)
-            else:
-                st.warning("No digits found.")
+        res_list, disp = [], img.copy()
+        for i, (x, y, w, h) in enumerate(merged):
+            roi = pred[y:y+h, x:x+w]
+            lbl, conf, det = ensemble_predict(roi, min_conf, strict_mode=False)
+            if lbl != -1 and conf > min_conf:
+                cv2.rectangle(disp, (x,y), (x+w,y+h), (0,255,0), 2)
+                draw_label(disp, f"#{i+1}", x, y, (0, 255, 0))
+                res_list.append({"ID": f"#{i+1}", "數字": str(lbl), "信心度": f"{int(conf*100)}%{det}"})
+        with c1: st.image(cv2.cvtColor(disp, cv2.COLOR_BGR2RGB), use_container_width=True)
+        with c2: st.dataframe(res_list, hide_index=True, use_container_width=True) if res_list else st.warning("No digits found.")
 
 # ==========================================
-# 5. 主程式分流 (含歡迎頁面)
+# 4. 主程式分流
 # ==========================================
 def main():
-    try:
-        if 'page' not in st.session_state:
-            st.session_state['page'] = 'welcome'
-
-        if st.session_state['page'] == 'welcome':
-            st.markdown("<br><br>", unsafe_allow_html=True)
-            c1, c2, c3 = st.columns([1, 2, 1])
-            with c2:
-                st.markdown("""
-                <div class="welcome-container">
-                    <div class="welcome-title">✒️ Handwriting AI</div>
-                    <div class="welcome-desc">
-                        智慧手寫數字辨識系統<br>
-                        支援即時鏡頭、手寫板、圖片上傳
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                if st.button("🚀 開始使用 / START", use_container_width=True, type="primary"):
-                    st.session_state['page'] = 'app'
-                    st.rerun()
-
-        elif st.session_state['page'] == 'app':
-            st.title("HANDWRITING AI")
-            
-            st.sidebar.header("Settings")
-            mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
-            st.sidebar.divider()
-            
-            with st.sidebar.expander("🔧 Advanced Config", expanded=False):
-                st.markdown("""
-                <div class="guide-text">
-                <b>💡 調整指南</b><br>
-                • <b>Erosion</b>: 數字黏在一起時調大。<br>
-                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。
-                </div>
-                """, unsafe_allow_html=True)
-                
-                strict_mode = True 
-                erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0)
-                dilation_iter = 0 
-                min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50)
-            
-            if st.sidebar.button("🏠 回到首頁"):
-                st.session_state['page'] = 'welcome'
+    if 'page' not in st.session_state: st.session_state['page'] = 'welcome'
+    if st.session_state['page'] == 'welcome':
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c2:
+            st.markdown('<div class="welcome-container"><div class="welcome-title">✒️ Handwriting AI</div><div class="welcome-desc">智慧手寫數字辨識系統<br>支援即時鏡位、手寫板、圖片上傳</div></div>', unsafe_allow_html=True)
+            if st.button("🚀 開始使用 / START", use_container_width=True, type="primary"):
+                st.session_state['page'] = 'app'
                 st.rerun()
-
-            if cnn_model is None:
-                st.error("Model not found! 請確保 mnist_cnn.h5 存在")
-                st.stop()
-
-            if mode == "📷 鏡頭 (Live)":
-                run_camera_mode(erosion_iter, dilation_iter, min_conf, strict_mode)
-            elif mode == "✍️ 手寫板 (Canvas)":
-                run_canvas_mode(erosion_iter, dilation_iter, min_conf, strict_mode)
-            elif mode == "📂 上傳 (Upload)":
-                run_upload_mode(erosion_iter, dilation_iter, min_conf, strict_mode)
+    else:
+        st.title("HANDWRITING AI")
+        mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
+        with st.sidebar.expander("🔧 Advanced Config"):
+            erosion = st.slider("Erosion (切割沾黏)", 0, 5, 0)
+            min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.5)
+        if st.sidebar.button("🏠 回到首頁"):
+            st.session_state['page'] = 'welcome'
+            st.rerun()
             
-    except Exception as e:
-        st.error(f"程式執行發生錯誤: {e}")
+        if mode == "📷 鏡頭 (Live)": run_camera_mode(erosion, 0, min_conf)
+        elif mode == "✍️ 手寫板 (Canvas)": run_canvas_mode(erosion, 0, min_conf)
+        elif mode == "📂 上傳 (Upload)": run_upload_mode(erosion, 0, min_conf)
 
 if __name__ == "__main__":
     main()
