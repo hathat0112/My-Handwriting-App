@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V124)", 
+    page_title="Handwriting AI (V125)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -51,6 +51,17 @@ st.markdown("""
     .welcome-container {text-align: center; padding: 50px; border-radius: 15px; background: rgba(128, 128, 128, 0.1); margin-top: 50px;}
     .welcome-title {font-size: 3rem; font-weight: 700; margin-bottom: 1rem; color: #333;}
     .welcome-desc {font-size: 1.2rem; color: #666; margin-bottom: 2rem;}
+    
+    /* 說明書樣式 */
+    .manual-box {
+        background-color: rgba(255, 255, 255, 0.05);
+        border-left: 4px solid #FF4B4B;
+        padding: 15px;
+        margin-bottom: 20px;
+        border-radius: 5px;
+    }
+    .manual-title {font-weight: bold; font-size: 1.1em; margin-bottom: 5px; color: #FF4B4B;}
+    .manual-text {font-size: 0.95em; line-height: 1.6; opacity: 0.9;}
     
     @media (prefers-color-scheme: dark) {
         .welcome-title {color: #ddd;}
@@ -427,11 +438,24 @@ class LiveProcessor(VideoProcessorBase):
         cv2.putText(img, status_text, (10, bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, bar_color, 2)
 
 def run_camera_mode(erosion, dilation, min_conf, strict_mode):
-    st.caption("請將數字置於鏡頭中央，穩定後自動抓拍")
+    # [V125] 新增說明書 (Expander)
+    with st.expander("📖 操作指南 (How to use)"):
+        st.markdown("""
+        <div class="manual-box">
+            <div class="manual-title">📸 鏡頭模式使用技巧</div>
+            <div class="manual-text">
+            1. <b>對準藍框</b>：請將數字置於畫面中央的藍色框框內。<br>
+            2. <b>保持穩定</b>：當偵測到數字時，下方會出現<b>黃色進度條</b>。請保持手機或紙張<b>完全靜止</b>。<br>
+            3. <b>自動抓拍</b>：倒數 3 秒結束後，進度條變綠，畫面會自動凍結並顯示結果。<br>
+            4. <b>重新開始</b>：點擊右上角的「🔄 重新掃描」按鈕即可解除凍結。
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v124-cam", 
+            key="v125-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
@@ -446,7 +470,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
         )
     with col2:
         if ctx.video_processor:
-            ctx.video_processor.update_params(erosion, dilation, min_conf, strict_mode)
+            ctx.video_processor.update_params(erosion, dilation, min_conf, strict_mode=True)
             if st.button("🔄 重新掃描", use_container_width=True):
                 ctx.video_processor.resume()
             if ctx.video_processor.frozen:
@@ -460,6 +484,20 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
 def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
     if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
+
+    # [V125] 新增說明書
+    with st.expander("📖 操作指南 (How to use)"):
+        st.markdown("""
+        <div class="manual-box">
+            <div class="manual-title">✍️ 手寫板模式使用技巧</div>
+            <div class="manual-text">
+            1. <b>工具選擇</b>：使用左上角的「✏️ 畫筆」或「🧽 橡皮擦」。<br>
+            2. <b>即時辨識</b>：在黑色畫布上書寫數字，右側會即時顯示結果。<br>
+            3. <b>智慧過濾</b>：此模式開啟了<b>嚴格過濾</b>，會自動忽略笑臉、塗鴉等非數字圖形。<br>
+            4. <b>清除重寫</b>：點擊「🗑️ 清空」可清除整個畫布。
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
     c1, c2 = st.columns([1.8, 1.2], gap="large")
     
@@ -532,6 +570,7 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 
                 if roi.size == 0: continue
                 
+                # 手寫板模式：維持 Strict Mode = True 以過濾笑臉
                 if not check_complexity(roi): continue
 
                 final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=True)
@@ -554,6 +593,19 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
 # 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf, strict_mode):
+    # [V125] 新增說明書
+    with st.expander("📖 操作指南 (How to use)"):
+        st.markdown("""
+        <div class="manual-box">
+            <div class="manual-title">📂 上傳模式使用技巧</div>
+            <div class="manual-text">
+            1. <b>格式支援</b>：支援 JPG, PNG, JPEG 格式。<br>
+            2. <b>寬容模式</b>：此模式<b>已關閉嚴格過濾</b>，能有效辨識有陰影、光線不足或筆跡較淡的圖片。<br>
+            3. <b>調整建議</b>：若數字黏在一起，可調大左側的 <b>Erosion</b>；若筆畫斷裂，可調大 <b>Dilation</b> (但通常預設值即可)。
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
     file = st.file_uploader("Drop an image here", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
     
     if not file:
@@ -609,8 +661,7 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             
             if roi.size == 0: continue
             
-            if not check_complexity(roi): continue
-
+            # [V122] 上傳模式：不檢查複雜度，不啟用 Strict Mode
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False)
             
             if final_lbl != -1 and final_conf > min_conf:
@@ -676,7 +727,7 @@ def main():
                 <div class="guide-text">
                 <b>💡 調整指南</b><br>
                 • <b>Erosion</b>: 數字黏在一起時調大。<br>
-                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。<br>
+                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。
                 </div>
                 """, unsafe_allow_html=True)
                 
