@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V100)", 
+    page_title="Handwriting AI (V101)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -34,7 +34,7 @@ ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
-# WebRTC 設定 (降低傳輸延遲)
+# WebRTC 設定
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
@@ -154,8 +154,8 @@ def preprocess_input(roi):
 
 def draw_label(img, text, x, y, color=(0, 255, 255)):
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.8
-    thickness = 2
+    scale = 1.2 # [V101] 字體加大，讓鏡頭模式看更清楚
+    thickness = 3
     (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
@@ -192,7 +192,7 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (V100: 效能極速優化)
+# 2. 鏡頭模式 (V101: 顯示預測結果)
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -206,10 +206,9 @@ class LiveProcessor(VideoProcessorBase):
         self.frozen = False
         self.frozen_frame = None
         
-        # [V100 關鍵] 快取機制
-        self.cached_rois = [] # 儲存上一幀的結果
-        self.last_process_time = 0 # 上次運算的時間
-        self.process_interval = 0.25 # 限制每秒最多算 4 次 (降低延遲)
+        self.cached_rois = [] 
+        self.last_process_time = 0 
+        self.process_interval = 0.25 
         
         self.session_start_time = time.time()
         self.warmup_duration = 2.0 
@@ -245,26 +244,22 @@ class LiveProcessor(VideoProcessorBase):
             roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
             cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 2)
 
-            # [V100 優化] 時間閥門：如果不滿足時間間隔，直接畫舊的框，不做運算
+            # 時間閥門：使用快取結果
             if (current_time - self.last_process_time) < self.process_interval:
                 if len(self.cached_rois) > 0:
                     for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
                         cv2.rectangle(display_img, (dx, dy), (dx+dw, dy+dh), box_color, 2)
-                        cv2.putText(display_img, txt, (dx, dy-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                        draw_label(display_img, txt, dx, dy) # 修正：確保快取時也重繪標籤
                 if is_warming_up:
                     cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
-            # --- 下面是「重度運算區」，每 0.25 秒才跑一次 ---
             self.last_process_time = current_time
             
-            # 擷取 ROI
             roi_img = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
             if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
-            # 影像處理
             gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
-            # [效能] 降低模糊半徑，減少運算
             blur = cv2.GaussianBlur(gray, (3, 3), 0) 
             binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
             binary_proc = v65_morphology(binary, self.erosion, self.dilation)
@@ -281,11 +276,8 @@ class LiveProcessor(VideoProcessorBase):
                 raw_boxes_for_stability.append({'box': (x+roi_rect[0], y+roi_rect[1], w, h)})
             
             valid_boxes.sort(key=lambda b: b[0])
-            
-            # 清空快取，準備更新
             self.cached_rois = []
             detected_something = False
-            count_id = 1
             
             for (x, y, w, h) in valid_boxes:
                 roi = binary_proc[y:y+h, x:x+w]
@@ -296,16 +288,13 @@ class LiveProcessor(VideoProcessorBase):
                     rx, ry = x + roi_rect[0], y + roi_rect[1]
                     box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
                     
-                    # 更新快取
-                    txt = f"#{count_id}"
-                    self.cached_rois.append((rx, ry, w, h, txt, box_color))
+                    # [V101 關鍵修正] 顯示預測數字，而不只是編號
+                    txt = str(final_lbl) 
                     
-                    # 畫在當前這一幀
+                    self.cached_rois.append((rx, ry, w, h, txt, box_color))
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
                     draw_label(display_img, txt, rx, ry)
-                    count_id += 1
 
-            # 穩定度與抓拍邏輯 (保持不變)
             if len(raw_boxes_for_stability) == 0:
                 self.stability_start_time = None
             elif len(self.last_boxes) == 0:
@@ -355,9 +344,9 @@ def run_camera_mode(erosion, dilation, min_conf):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v100-cam", # key change to force refresh
+            key="v101-cam", 
             mode=WebRtcMode.SENDRECV,
-            rtc_configuration=RTC_CONFIGURATION, # 加入 RTC 設定
+            rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
             async_processing=True,
         )
@@ -485,6 +474,7 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
+        # BlackHat 運算
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
