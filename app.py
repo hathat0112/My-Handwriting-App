@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V99)", 
+    page_title="Handwriting AI (V100)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -17,7 +17,7 @@ import time
 import av
 import joblib
 from streamlit_drawable_canvas import st_canvas
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, RTCConfiguration
 from streamlit_image_coordinates import streamlit_image_coordinates
 from tensorflow.keras.models import load_model
 from tensorflow.keras.datasets import mnist
@@ -34,7 +34,12 @@ ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
-# CSS 修飾 (保持 V98 的沉浸式風格)
+# WebRTC 設定 (降低傳輸延遲)
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
+
+# CSS 修飾
 st.markdown("""
 <style>
     header[data-testid="stHeader"] {background-color: transparent; z-index: 999;}
@@ -155,48 +160,39 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [V99 核心變更] CNN 主導判斷模式
+# [CNN 優先邏輯]
 def ensemble_predict(roi, min_conf):
-    # 1. 取得 CNN 判斷結果 (這是主角)
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
     lbl_cnn = np.argmax(pred_cnn)
     conf_cnn = np.max(pred_cnn)
     
-    # 2. 取得傳統模型判斷結果 (這是配角)
     lbl_knn = -1
     if knn_model: lbl_knn = knn_model.predict(flat_in)[0]
     lbl_svm = -1
     if svm_model: lbl_svm = svm_model.predict(flat_in)[0]
     
-    # 3. 決策邏輯：以 CNN 為主
     final_lbl = lbl_cnn
     final_conf = conf_cnn
     details = ""
     
-    # 4. 輔助檢查：看看傳統模型是否同意
     agree_count = 0
     if knn_model and lbl_knn == lbl_cnn: agree_count += 1
     if svm_model and lbl_svm == lbl_cnn: agree_count += 1
     
-    # 如果大家都同意，信心度加分
     if agree_count == 2:
         final_conf = min(0.99, final_conf + 0.05)
     else:
-        # 如果有人反對，信心度扣分，並標註異議者
         final_conf = max(0.0, final_conf - 0.15)
-        
         disagreements = []
         if knn_model and lbl_knn != lbl_cnn: disagreements.append(f"K:{lbl_knn}")
         if svm_model and lbl_svm != lbl_cnn: disagreements.append(f"S:{lbl_svm}")
-        
-        if disagreements:
-            details = f" ({'/'.join(disagreements)})"
+        if disagreements: details = f" ({'/'.join(disagreements)})"
         
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式
+# 2. 鏡頭模式 (V100: 效能極速優化)
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -204,13 +200,17 @@ class LiveProcessor(VideoProcessorBase):
         self.erosion = 0
         self.dilation = 2
         self.min_conf = 0.5
+        
         self.last_boxes = []
         self.stability_start_time = None
         self.frozen = False
         self.frozen_frame = None
-        self.frame_counter = 0
-        self.skip_rate = 6  
-        self.cached_rois = []
+        
+        # [V100 關鍵] 快取機制
+        self.cached_rois = [] # 儲存上一幀的結果
+        self.last_process_time = 0 # 上次運算的時間
+        self.process_interval = 0.25 # 限制每秒最多算 4 次 (降低延遲)
+        
         self.session_start_time = time.time()
         self.warmup_duration = 2.0 
 
@@ -223,15 +223,17 @@ class LiveProcessor(VideoProcessorBase):
         self.frozen = False
         self.stability_start_time = None
         self.last_boxes = []
-        self.frame_counter = 0
+        self.cached_rois = []
         self.session_start_time = time.time()
 
     def recv(self, frame):
         try:
             img = frame.to_ndarray(format="bgr24")
+            current_time = time.time()
+            
             if not hasattr(self, 'session_start_time') or self.session_start_time is None:
-                self.session_start_time = time.time()
-            is_warming_up = (time.time() - self.session_start_time) < self.warmup_duration
+                self.session_start_time = current_time
+            is_warming_up = (current_time - self.session_start_time) < self.warmup_duration
 
             if self.frozen and self.frozen_frame is not None:
                 return av.VideoFrame.from_ndarray(self.frozen_frame, format="bgr24")
@@ -243,8 +245,8 @@ class LiveProcessor(VideoProcessorBase):
             roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
             cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 2)
 
-            self.frame_counter += 1
-            if not (self.frame_counter % self.skip_rate == 0):
+            # [V100 優化] 時間閥門：如果不滿足時間間隔，直接畫舊的框，不做運算
+            if (current_time - self.last_process_time) < self.process_interval:
                 if len(self.cached_rois) > 0:
                     for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
                         cv2.rectangle(display_img, (dx, dy), (dx+dw, dy+dh), box_color, 2)
@@ -252,13 +254,19 @@ class LiveProcessor(VideoProcessorBase):
                 if is_warming_up:
                     cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 return av.VideoFrame.from_ndarray(display_img, format="bgr24")
+
+            # --- 下面是「重度運算區」，每 0.25 秒才跑一次 ---
+            self.last_process_time = current_time
             
+            # 擷取 ROI
             roi_img = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
             if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
+            # 影像處理
             gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
-            blur = cv2.GaussianBlur(gray, (5, 5), 0)
-            binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10)
+            # [效能] 降低模糊半徑，減少運算
+            blur = cv2.GaussianBlur(gray, (3, 3), 0) 
+            binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
             binary_proc = v65_morphology(binary, self.erosion, self.dilation)
             
             cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -273,6 +281,8 @@ class LiveProcessor(VideoProcessorBase):
                 raw_boxes_for_stability.append({'box': (x+roi_rect[0], y+roi_rect[1], w, h)})
             
             valid_boxes.sort(key=lambda b: b[0])
+            
+            # 清空快取，準備更新
             self.cached_rois = []
             detected_something = False
             count_id = 1
@@ -280,16 +290,22 @@ class LiveProcessor(VideoProcessorBase):
             for (x, y, w, h) in valid_boxes:
                 roi = binary_proc[y:y+h, x:x+w]
                 final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
+                
                 if final_conf > self.min_conf:
                     detected_something = True
                     rx, ry = x + roi_rect[0], y + roi_rect[1]
                     box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
-                    cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
+                    
+                    # 更新快取
                     txt = f"#{count_id}"
-                    draw_label(display_img, txt, rx, ry)
                     self.cached_rois.append((rx, ry, w, h, txt, box_color))
+                    
+                    # 畫在當前這一幀
+                    cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
+                    draw_label(display_img, txt, rx, ry)
                     count_id += 1
 
+            # 穩定度與抓拍邏輯 (保持不變)
             if len(raw_boxes_for_stability) == 0:
                 self.stability_start_time = None
             elif len(self.last_boxes) == 0:
@@ -315,11 +331,13 @@ class LiveProcessor(VideoProcessorBase):
                     if self.stability_start_time is None: self.stability_start_time = time.time()
                     elapsed = time.time() - self.stability_start_time
                     progress = min(elapsed / STABILITY_DURATION, 1.0)
+                    
                     bar_y = h_f - 20 
                     bar_w = int(600 * progress)
                     color = (0, 255, 255) if progress < 1.0 else (0, 255, 0)
                     cv2.rectangle(display_img, (20, bar_y - 15), (20 + bar_w, bar_y), color, -1)
                     cv2.rectangle(display_img, (20, bar_y - 15), (w_f - 20, bar_y), (255, 255, 255), 2)
+                    
                     if elapsed >= STABILITY_DURATION and detected_something:
                         self.frozen = True
                         self.frozen_frame = display_img.copy()
@@ -337,8 +355,9 @@ def run_camera_mode(erosion, dilation, min_conf):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v65-cam",
+            key="v100-cam", # key change to force refresh
             mode=WebRtcMode.SENDRECV,
+            rtc_configuration=RTC_CONFIGURATION, # 加入 RTC 設定
             video_processor_factory=LiveProcessor,
             async_processing=True,
         )
@@ -441,7 +460,7 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (V98: 增加邊緣過濾)
+# 4. 上傳模式 (V98: 邊緣過濾)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     file = st.file_uploader("Drop an image here", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
@@ -466,7 +485,6 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # BlackHat 運算
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
@@ -486,7 +504,6 @@ def run_upload_mode(erosion, dilation, min_conf):
             if w < 10 and h < 10: continue
             if w * h > (img_h * img_w * 0.9): continue
             
-            # [V98 核心修正] 邊緣過濾：如果方框底部太接近圖片邊緣，視為雜訊
             if y + h > img_h - 10: 
                 continue 
 
