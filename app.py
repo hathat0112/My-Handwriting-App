@@ -1,15 +1,5 @@
 import streamlit as st
-
-# ==========================================
-# 0. 頁面設定
-# ==========================================
-st.set_page_config(
-    page_title="Handwriting AI (V114)", 
-    page_icon="✒️", 
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
+import pandas as pd # 新增 pandas 用於圖表
 import cv2
 import numpy as np
 import os
@@ -18,98 +8,77 @@ import av
 import joblib
 from streamlit_drawable_canvas import st_canvas
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, RTCConfiguration
-from streamlit_image_coordinates import streamlit_image_coordinates
 from tensorflow.keras.models import load_model
 from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
-# 參數設定
-STABILITY_DURATION = 1.5    
-MOVEMENT_THRESHOLD = 120    
-ROI_MARGIN_X = 60
-ROI_MARGIN_Y = 60
-SHRINK_PX = 4
-
-RTC_CONFIGURATION = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+# ==========================================
+# 0. 頁面設定 (開發者風格)
+# ==========================================
+st.set_page_config(
+    page_title="AI Model Lab (Dev Tool)", 
+    page_icon="🛠️", 
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# CSS 修飾
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+# CSS: 讓介面看起來更像儀表板
 st.markdown("""
 <style>
-    header[data-testid="stHeader"] {background-color: transparent; z-index: 999;}
-    section[data-testid="stSidebar"] {border-right: 1px solid rgba(128, 128, 128, 0.2);}
-    .stButton>button {
-        background-color: #4a4a4a !important; color: white !important; border: none; transition: all 0.3s ease;
-    }
-    .stButton>button:hover {background-color: #FF4B4B !important; transform: scale(1.02);}
-    iframe[title="streamlit_drawable_canvas.st_canvas"] {border: none !important; box-shadow: none !important; background-color: transparent !important;}
-    div[data-testid="stVerticalBlock"] > div {background-color: transparent;}
-    footer {visibility: hidden;}
-    .block-container {padding-top: 2rem;}
-    .welcome-container {text-align: center; padding: 50px; border-radius: 15px; background: rgba(128, 128, 128, 0.1); margin-top: 50px;}
-    .welcome-title {font-size: 3rem; font-weight: 700; margin-bottom: 1rem; color: #333;}
-    .welcome-desc {font-size: 1.2rem; color: #666; margin-bottom: 2rem;}
-    
-    @media (prefers-color-scheme: dark) {
-        .welcome-title {color: #ddd;}
-        .welcome-desc {color: #aaa;}
-    }
+    .stApp {background-color: #0e1117;}
+    .reportview-container {background: #0e1117;}
+    .sidebar .sidebar-content {background: #262730;}
+    h1, h2, h3 {font-family: 'Courier New', monospace;}
+    .metric-card {background-color: #1f2937; padding: 15px; border-radius: 8px; border: 1px solid #374151;}
+    .stDataFrame {border: 1px solid #374151;}
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 共用核心與模型載入
+# 1. 模型載入
 # ==========================================
 @st.cache_resource
 def load_models():
+    # 載入 CNN
     cnn = None
-    model_files = ["cnn_model_robust.h5", "mnist_cnn.h5", "cnn_model.h5"]
-    for f in model_files:
-        if os.path.exists(f):
-            try:
-                cnn = load_model(f)
-                print(f"✅ CNN Loaded: {f}")
-                break
-            except: pass
+    if os.path.exists("mnist_cnn.h5"):
+        try: cnn = load_model("mnist_cnn.h5")
+        except: pass
     
+    # 準備訓練資料給 KNN/SVM
     x_flat = None
     y_train = None
     try:
         (x_raw, y_raw), _ = mnist.load_data()
-        x_flat = x_raw.reshape(-1, 784)[:10000] / 255.0
-        y_train = y_raw[:10000]
+        x_flat = x_raw.reshape(-1, 784)[:5000] / 255.0 # 僅用 5000 筆加速
+        y_train = y_raw[:5000]
     except: pass
 
+    # 載入或訓練 KNN
     knn = None
     knn_path = "knn_model.pkl"
     if os.path.exists(knn_path):
         try: knn = joblib.load(knn_path)
         except: pass
-    
     if knn is None and x_flat is not None:
-        try:
-            knn = KNeighborsClassifier(n_neighbors=3)
-            knn.fit(x_flat, y_train)
-            joblib.dump(knn, knn_path)
-        except: pass
+        knn = KNeighborsClassifier(n_neighbors=3)
+        knn.fit(x_flat, y_train)
+        # joblib.dump(knn, knn_path) # 開發版不強制存檔
 
+    # 載入或訓練 SVM
     svm = None
     svm_path = "svm_model.pkl"
     if os.path.exists(svm_path):
         try: svm = joblib.load(svm_path)
         except: pass
-    
     if svm is None and x_flat is not None:
-        try:
-            svm = SVC(kernel='rbf', probability=True)
-            svm.fit(x_flat, y_train)
-            joblib.dump(svm, svm_path)
-        except: pass
-        
+        svm = SVC(kernel='rbf', probability=True)
+        svm.fit(x_flat, y_train)
+        # joblib.dump(svm, svm_path)
+
     return cnn, knn, svm
 
 try:
@@ -118,567 +87,214 @@ except Exception as e:
     st.error(f"❌ 模型載入失敗: {e}")
     st.stop()
 
-# 雙層處理邏輯
-def get_contour_mask(binary_img, erosion):
-    res = binary_img.copy()
-    if erosion > 0:
-        kernel = np.ones((3,3), np.uint8)
-        res = cv2.erode(res, kernel, iterations=erosion)
-    kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=1)
-    return res
-
-def get_prediction_img(binary_img, dilation):
-    res = binary_img.copy()
-    if dilation > 0:
-        kernel_dil = np.ones((3,3), np.uint8)
-        res = cv2.dilate(res, kernel_dil, iterations=dilation)
-    return res
-
-def check_complexity(roi):
-    cnts, hierarchy = cv2.findContours(roi, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    if len(cnts) <= 1: return True
-    internal_shapes = 0
-    if hierarchy is not None:
-        for h in hierarchy[0]:
-            if h[3] != -1: 
-                internal_shapes += 1
-    if internal_shapes > 2:
-        return False 
-    return True
-
-def merge_nearby_boxes(boxes, distance_threshold=20):
-    if not boxes: return []
-    rects = []
-    for (x, y, w, h) in boxes:
-        rects.append([x, y, x+w, y+h])
-    rects = np.array(rects)
-    while True:
-        merged = False
-        new_rects = []
-        used = [False] * len(rects)
-        for i in range(len(rects)):
-            if used[i]: continue
-            x1, y1, x2, y2 = rects[i]
-            for j in range(i + 1, len(rects)):
-                if used[j]: continue
-                ox1, oy1, ox2, oy2 = rects[j]
-                dist_x = max(0, x1 - ox2) + max(0, ox1 - x2)
-                dist_y = max(0, y1 - oy2) + max(0, oy1 - y2)
-                if dist_x < distance_threshold and dist_y < distance_threshold:
-                    x1 = min(x1, ox1)
-                    y1 = min(y1, oy1)
-                    x2 = max(x2, ox2)
-                    y2 = max(y2, oy2)
-                    used[j] = True
-                    merged = True
-            new_rects.append([x1, y1, x2, y2])
-        if not merged: break
-        rects = np.array(new_rects)
-    final_boxes = []
-    for (x1, y1, x2, y2) in rects:
-        final_boxes.append((x1, y1, x2-x1, y2-y1))
-    return final_boxes
-
-def preprocess_input(roi):
+# ==========================================
+# 2. 核心分析函式 (Deep Analysis)
+# ==========================================
+def preprocess_for_analysis(roi):
+    """將圖片轉為 28x28 並進行標準化，保留原始特徵供檢視"""
     h, w = roi.shape
+    # 保持長寬比縮放
     scale = 20.0 / max(h, w)
     nh, nw = max(1, int(h * scale)), max(1, int(w * scale))
     resized = cv2.resize(roi, (nw, nh), interpolation=cv2.INTER_AREA)
+    
+    # 填補至 28x28
     canvas = np.zeros((28, 28), dtype=np.uint8)
     y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
     canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
+    
+    # 重心置中 (Center by Moments) - 這是標準 MNIST 處理
     m = cv2.moments(canvas, True)
     if m['m00'] > 0.1:
         cX, cY = m['m10'] / m['m00'], m['m01'] / m['m00']
         tX, tY = 14.0 - cX, 14.0 - cY
         M = np.float32([[1, 0, tX], [0, 1, tY]])
         canvas = cv2.warpAffine(canvas, M, (28, 28), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        
     cnn_in = canvas.reshape(1, 28, 28, 1).astype('float32') / 255.0
     flat_in = canvas.reshape(1, 784).astype('float32') / 255.0
-    return cnn_in, flat_in
+    return cnn_in, flat_in, canvas
 
-def draw_label(img, text, x, y, color=(0, 255, 255), is_dashed=False):
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 1.0
-    thickness = 2
-    (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
-    if is_dashed:
-        cv2.rectangle(img, (x, y), (x + lw + 10, y + 20), color, 1)
-    else:
-        cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
-        cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
-
-def ensemble_predict(roi, min_conf, strict_mode=False):
-    cnn_in, flat_in = preprocess_input(roi)
-    pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
-    lbl_cnn = np.argmax(pred_cnn)
-    conf_cnn = np.max(pred_cnn)
+def analyze_digit(roi):
+    """執行多模型分析，回傳詳細數據"""
+    cnn_in, flat_in, raw_img = preprocess_for_analysis(roi)
     
-    lbl_knn = -1
-    if knn_model: lbl_knn = knn_model.predict(flat_in)[0]
-    lbl_svm = -1
-    if svm_model: lbl_svm = svm_model.predict(flat_in)[0]
+    # 1. CNN 預測 (含機率分佈)
+    pred_prob = cnn_model.predict(cnn_in, verbose=0)[0]
+    cnn_lbl = np.argmax(pred_prob)
+    cnn_conf = float(np.max(pred_prob))
     
-    final_lbl = lbl_cnn
-    final_conf = conf_cnn
-    details = ""
+    # 2. KNN 預測
+    knn_lbl = knn_model.predict(flat_in)[0] if knn_model else -1
     
-    agree_count = 0
-    if knn_model and lbl_knn == lbl_cnn: agree_count += 1
-    if svm_model and lbl_svm == lbl_cnn: agree_count += 1
+    # 3. SVM 預測
+    svm_lbl = svm_model.predict(flat_in)[0] if svm_model else -1
     
-    if strict_mode:
-        if (knn_model and lbl_knn != lbl_cnn) or (svm_model and lbl_svm != lbl_cnn):
-            if final_conf < 0.85:
-                return -1, 0.0, " (Disagree)"
-        if final_conf < 0.8:
-            return -1, 0.0, " (Low Conf)"
-
-    if agree_count == 2:
-        final_conf = min(0.99, final_conf + 0.05)
-    else:
-        if conf_cnn > 0.85:
-            final_conf = conf_cnn
-        else:
-            final_conf = max(0.0, final_conf - 0.15)
-            
-        disagreements = []
-        if knn_model and lbl_knn != lbl_cnn: disagreements.append(f"K:{lbl_knn}")
-        if svm_model and lbl_svm != lbl_cnn: disagreements.append(f"S:{lbl_svm}")
-        if disagreements: details = f" ({'/'.join(disagreements)})"
-        
-    return final_lbl, final_conf, details
+    return {
+        "cnn_label": int(cnn_lbl),
+        "cnn_conf": cnn_conf,
+        "probs": pred_prob,
+        "knn_label": int(knn_lbl),
+        "svm_label": int(svm_lbl),
+        "raw_img": raw_img # 這是 28x28 的原始圖
+    }
 
 # ==========================================
-# 2. 鏡頭模式
+# 3. 輔助函式 (影像處理)
 # ==========================================
-class LiveProcessor(VideoProcessorBase):
-    def __init__(self):
-        self.model = cnn_model
-        self.erosion = 0
-        self.dilation = 0 
-        self.min_conf = 0.50 
-        self.strict_mode = True # [V114] 內部預設開啟
-        
-        self.last_boxes = []
-        self.stability_start_time = None
-        self.frozen = False
-        self.frozen_frame = None
-        self.cached_rois = [] 
-        self.last_process_time = 0 
-        self.process_interval = 0.25 
-        self.session_start_time = time.time()
-        self.warmup_duration = 2.0 
-
-    def update_params(self, ero, dil, conf, strict):
-        self.erosion = ero
-        self.dilation = dil
-        self.min_conf = conf
-        self.strict_mode = strict
-
-    def resume(self):
-        self.frozen = False
-        self.stability_start_time = None
-        self.last_boxes = []
-        self.cached_rois = []
-        self.session_start_time = time.time()
-
-    def recv(self, frame):
-        try:
-            img = frame.to_ndarray(format="bgr24")
-            current_time = time.time()
-            if not hasattr(self, 'session_start_time') or self.session_start_time is None:
-                self.session_start_time = current_time
-            is_warming_up = (current_time - self.session_start_time) < self.warmup_duration
-
-            if self.frozen and self.frozen_frame is not None:
-                return av.VideoFrame.from_ndarray(self.frozen_frame, format="bgr24")
-            
-            display_img = img.copy()
-            h_f, w_f = img.shape[:2]
-            
-            roi_rect = [ROI_MARGIN_X, ROI_MARGIN_Y, w_f - 2*ROI_MARGIN_X, h_f - 2*ROI_MARGIN_Y]
-            roi_color = (0, 0, 255) if is_warming_up else (255, 0, 0)
-            cv2.rectangle(display_img, (roi_rect[0], roi_rect[1]), (roi_rect[0]+roi_rect[2], roi_rect[1]+roi_rect[3]), roi_color, 2)
-
-            if (current_time - self.last_process_time) < self.process_interval:
-                if len(self.cached_rois) > 0:
-                    for (dx, dy, dw, dh, txt, box_color, dashed) in self.cached_rois:
-                        cv2.rectangle(display_img, (dx, dy), (dx+dw, dy+dh), box_color, 2)
-                        draw_label(display_img, txt, dx, dy, box_color, dashed)
-                if is_warming_up:
-                    cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                return av.VideoFrame.from_ndarray(display_img, format="bgr24")
-
-            self.last_process_time = current_time
-            roi_img = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
-            if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
-
-            gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
-            blur = cv2.GaussianBlur(gray, (5, 5), 0) 
-            binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
-            
-            mask_img = get_contour_mask(binary, self.erosion)
-            pred_img = get_prediction_img(binary, self.dilation)
-            
-            cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            raw_boxes = []
-            min_area = 50 if self.erosion > 3 else 150
-            
-            for c in cnts:
-                if cv2.contourArea(c) < min_area: continue 
-                x, y, w, h = cv2.boundingRect(c)
-                if x<5 or y<5: continue
-                aspect_ratio = w / float(h)
-                if aspect_ratio > 1.5: continue 
-                if h < 15: continue
-                if x < 10: continue 
-                raw_boxes.append((x,y,w,h))
-            
-            merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=20)
-            merged_boxes.sort(key=lambda b: b[0])
-            self.cached_rois = []
-            
-            detected_something = False
-            for (x, y, w, h) in merged_boxes:
-                pad = self.erosion * 2
-                roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
-                               max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
-                
-                if roi.size == 0: continue
-                
-                if not check_complexity(roi): continue
-
-                final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf, self.strict_mode)
-                
-                rx, ry = x + roi_rect[0], y + roi_rect[1]
-                
-                if final_lbl != -1 and final_conf > self.min_conf:
-                    detected_something = True
-                    box_color = (0, 255, 0)
-                    self.cached_rois.append((rx, ry, w, h, str(final_lbl), box_color, False))
-                    cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
-                    draw_label(display_img, str(final_lbl), rx, ry, box_color, False)
-                elif self.strict_mode:
-                    box_color = (0, 255, 255)
-                    self.cached_rois.append((rx, ry, w, h, "?", box_color, True))
-                    cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 1)
-
-            if detected_something:
-                if self.stability_start_time is None:
-                    self.stability_start_time = current_time
-            else:
-                self.stability_start_time = None
-                
-            if self.stability_start_time is not None and not is_warming_up:
-                elapsed = current_time - self.stability_start_time
-                progress = min(elapsed / STABILITY_DURATION, 1.0)
-                bar_x = roi_rect[0]
-                bar_y = roi_rect[1] + roi_rect[3] + 20
-                bar_w = roi_rect[2]
-                bar_h = 15
-                cv2.rectangle(display_img, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (50, 50, 50), -1)
-                fill_w = int(bar_w * progress)
-                bar_color = (0, 255, 255)
-                if progress >= 1.0: bar_color = (0, 255, 0)
-                cv2.rectangle(display_img, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), bar_color, -1)
-                status_text = "Scanning..." if progress < 1.0 else "Captured!"
-                cv2.putText(display_img, status_text, (bar_x, bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, bar_color, 2)
-                if progress >= 1.0 and len(self.cached_rois) > 0:
-                    self.frozen = True
-                    self.frozen_frame = display_img.copy()
-
-            return av.VideoFrame.from_ndarray(display_img, format="bgr24")
-        except Exception as e:
-            return av.VideoFrame.from_ndarray(frame.to_ndarray(format="bgr24"), format="bgr24")
-
-def run_camera_mode(erosion, dilation, min_conf, strict_mode):
-    st.caption("請將數字置於鏡頭中央，穩定後自動抓拍")
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        ctx = webrtc_streamer(
-            key="v114-cam", 
-            mode=WebRtcMode.SENDRECV,
-            rtc_configuration=RTC_CONFIGURATION,
-            video_processor_factory=LiveProcessor,
-            async_processing=True,
-            media_stream_constraints={
-                "video": {
-                    "width": {"min": 640, "ideal": 1280, "max": 1280},
-                    "height": {"min": 480, "ideal": 720, "max": 720},
-                    "frameRate": {"max": 30},
-                }
-            }
-        )
-    with col2:
-        if ctx.video_processor:
-            ctx.video_processor.update_params(erosion, dilation, min_conf, strict_mode)
-            if st.button("🔄 重新掃描", use_container_width=True):
-                ctx.video_processor.resume()
-            if ctx.video_processor.frozen:
-                st.success("✅ 畫面已鎖定")
-            else:
-                st.info("⏳ 偵測中...")
+def get_binary_image(gray, method, block_size, c_val):
+    """根據開發者設定的參數進行二值化"""
+    if method == "Adaptive Gaussian":
+        # Block size 必須是奇數
+        if block_size % 2 == 0: block_size += 1
+        return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block_size, c_val)
+    elif method == "Otsu":
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        return binary
+    else: # Simple
+        _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV)
+        return binary
 
 # ==========================================
-# 3. 手寫板模式
+# 4. 上傳與實驗模式 (Lab Mode)
 # ==========================================
-def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
-    if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
-    if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
-
-    c1, c2 = st.columns([1.8, 1.2], gap="large")
+def run_lab_mode(thresh_method, block_size, c_val, show_intermediate):
+    st.markdown("### 🧪 影像實驗室 (Image Lab)")
     
-    with c1:
-        st.subheader("Canvas")
-        t1, t2, t3 = st.columns([2, 1, 1])
-        with t1:
-            tool_mode = st.radio("工具", ["✏️ 畫筆", "🧽 橡皮擦"], horizontal=True, label_visibility="collapsed")
-        with t2:
-            if st.button("↩️ 復原", use_container_width=True):
-                if st.session_state['canvas_json']:
-                    data = st.session_state['canvas_json']
-                    if "objects" in data and len(data["objects"]) > 0:
-                        data["objects"].pop()
-                        st.session_state['initial_drawing'] = data
-                        st.session_state['canvas_key'] = f"canvas_{time.time()}"
-                        st.rerun()
-        with t3:
-            if st.button("🗑️ 清空", use_container_width=True):
-                st.session_state['canvas_key'] = f"canvas_{time.time()}"
-                st.session_state['initial_drawing'] = None
-                st.rerun()
-
-        canvas_res = st_canvas(
-            fill_color="rgba(255, 165, 0, 0.3)",
-            stroke_width=15 if tool_mode == "✏️ 畫筆" else 40,
-            stroke_color="#FFFFFF" if tool_mode == "✏️ 畫筆" else "#000000",
-            background_color="#000000",
-            height=400, width=600, drawing_mode="freedraw",
-            initial_drawing=st.session_state['initial_drawing'],
-            key=st.session_state.get('canvas_key', 'canvas_0'),
-            display_toolbar=False 
-        )
-        if canvas_res.json_data is not None: st.session_state['canvas_json'] = canvas_res.json_data
-    
-    with c2:
-        st.subheader("Analysis")
-        if canvas_res.image_data is not None and np.max(canvas_res.image_data) > 0:
-            raw = canvas_res.image_data.astype(np.uint8)
-            img_bgr = cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR) if raw.shape[2] == 4 else raw
-            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            
-            mask_img = get_contour_mask(binary, erosion)
-            pred_img = get_prediction_img(binary, dilation)
-            
-            cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            raw_boxes = []
-            min_area = 50 if erosion > 3 else 400 
-            
-            for c in cnts:
-                area = cv2.contourArea(c)
-                if area < min_area: continue 
-                x, y, w, h = cv2.boundingRect(c)
-                if h < 20 or w < 10: continue 
-                raw_boxes.append((x,y,w,h))
-            
-            merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=30)
-            merged_boxes.sort(key=lambda b: b[0])
-            
-            draw_img = img_bgr.copy()
-            results_list = []
-            valid_count = 1
-            
-            for i, (x, y, w, h) in enumerate(merged_boxes):
-                pad = erosion * 2
-                roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
-                               max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
-                
-                if roi.size == 0: continue
-                
-                if not check_complexity(roi): continue
-
-                final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
-                
-                if final_lbl != -1 and final_conf > min_conf:
-                    cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    draw_label(draw_img, f"#{valid_count}", x, y, (0, 255, 0), False)
-                    status_text = f"{int(final_conf*100)}%{details}"
-                    results_list.append({"ID": f"#{valid_count}", "數字": str(final_lbl), "信心度": status_text})
-                    valid_count += 1
-                elif strict_mode:
-                    cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 255), 1)
-            
-            if results_list:
-                st.dataframe(results_list, hide_index=True, use_container_width=True)
-            else:
-                st.info("Waiting for input...")
-            
-            with st.expander("查看 AI 視覺 (Debug)"):
-                st.image(draw_img, caption="Detection", channels="BGR", use_container_width=True)
-        else:
-            st.markdown("*Ready to analyze...*")
-
-# ==========================================
-# 4. 上傳模式
-# ==========================================
-def run_upload_mode(erosion, dilation, min_conf, strict_mode):
-    file = st.file_uploader("Drop an image here", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
-    
-    if not file:
-        st.markdown("""
-        <div style="text-align: center; color: #888; padding: 3rem; border: 2px dashed #ddd; border-radius: 10px;">
-            <h3>📤 Upload Image</h3>
-            <p>Drag and drop or click to browse</p>
-        </div>
-        """, unsafe_allow_html=True)
+    file = st.file_uploader("上傳圖片進行深度分析", type=["jpg", "png", "jpeg"])
     
     if file:
+        # 讀取圖片
         file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
         img_origin = cv2.imdecode(file_bytes, 1)
-        img_h, img_w = img_origin.shape[:2]
         
-        if img_w > 1000:
-            scale = 1000 / img_w
-            img_origin = cv2.resize(img_origin, (1000, int(img_h * scale)))
-            img_h, img_w = img_origin.shape[:2] 
-            
+        # 縮放過大圖片
+        h, w = img_origin.shape[:2]
+        if w > 800:
+            scale = 800 / w
+            img_origin = cv2.resize(img_origin, (800, int(h * scale)))
+        
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-        blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
-        blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
-        _, binary = cv2.threshold(blackhat_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # --- 步驟 1: 使用開發者參數進行二值化 ---
+        binary = get_binary_image(gray, thresh_method, block_size, c_val)
         
-        mask_img = get_contour_mask(binary, erosion)
-        pred_img = get_prediction_img(binary, dilation)
+        # 顯示中間產物 (Debug View)
+        if show_intermediate:
+            c_debug1, c_debug2 = st.columns(2)
+            with c_debug1: st.image(gray, caption="原始灰階", use_container_width=True)
+            with c_debug2: st.image(binary, caption=f"二值化 ({thresh_method})", use_container_width=True)
+
+        # --- 步驟 2: 輪廓偵測與切割 ---
+        # 這裡不使用過多的形態學操作，保留原始雜訊以供測試
+        cnts, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        raw_boxes = []
-        min_area = 20 if erosion > 3 else 80
+        digit_candidates = []
+        display_img = img_origin.copy()
         
         for c in cnts:
-            area = cv2.contourArea(c)
-            if area < min_area: continue 
             x, y, w, h = cv2.boundingRect(c)
-            if w < 5 and h < 5: continue
-            if w * h > (img_h * img_w * 0.9): continue
-            if y + h > img_h - 10: continue 
-            raw_boxes.append((x,y,w,h))
+            if w * h < 100: continue # 過濾極小噪點
+            if h < 20: continue
             
-        merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=25)
-        merged_boxes.sort(key=lambda item: (item[1]//50, item[0]))
+            # 在原圖畫框
+            cv2.rectangle(display_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(display_img, f"#{len(digit_candidates)+1}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            
+            roi = binary[y:y+h, x:x+w]
+            digit_candidates.append({"id": len(digit_candidates)+1, "roi": roi, "rect": (x,y,w,h)})
+
+        # 排序 (從左到右，從上到下)
+        digit_candidates.sort(key=lambda k: (k['rect'][1] // 50, k['rect'][0]))
+
+        # --- 步驟 3: 顯示全域結果 ---
+        st.image(display_img, caption=f"偵測到 {len(digit_candidates)} 個潛在區域", use_container_width=True, channels="BGR")
         
-        valid_boxes_data = []
-        for (x, y, w, h) in merged_boxes:
-            pad = erosion * 2
-            roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
-                           max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
-            
-            if roi.size == 0: continue
-            
-            if not check_complexity(roi): continue
+        if not digit_candidates:
+            st.warning("⚠️ 未偵測到任何數字，請調整左側『二值化參數』。")
+            return
 
-            final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
-            if final_lbl != -1 and final_conf > min_conf:
-                valid_boxes_data.append({'rect': (x,y,w,h), 'lbl': final_lbl, 'conf': final_conf, 'details': details})
-
-        c1, c2 = st.columns([1.5, 1], gap="large")
-        with c1:
-            display_img = img_origin.copy()
-            valid_count = 1
-            results_list = []
+        st.divider()
+        st.markdown("### 🔬 深度分析報告 (Deep Analysis Report)")
+        
+        # --- 步驟 4: 逐一分析並顯示詳細儀表板 ---
+        # 為了避免畫面過長，如果超過 10 個只顯示前 10 個
+        limit = 20
+        for i, item in enumerate(digit_candidates[:limit]):
+            res = analyze_digit(item['roi'])
             
-            for item in valid_boxes_data:
-                x, y, w, h = item['rect']
-                cv2.rectangle(display_img, (x,y), (x+w,y+h), (0,255,0), 2)
-                draw_label(display_img, f"#{valid_count}", x, y, (0, 255, 0), False)
-                results_list.append({"ID": f"#{valid_count}", "數字": str(item['lbl']), "信心度": f"{int(item['conf']*100)}%{item['details']}"})
-                valid_count += 1
-            
-            st.image(cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB), use_container_width=True, caption="Recognition Result")
+            # 判斷模型是否衝突
+            models_agree = (res['cnn_label'] == res['knn_label'] == res['svm_label'])
+            status_icon = "🟢" if models_agree else "🔴"
+            if res['cnn_conf'] < 0.7: status_icon = "⚠️"
 
-        with c2:
-            st.subheader("Result")
-            if results_list:
-                st.dataframe(results_list, hide_index=True, use_container_width=True)
-            else:
-                st.warning("No digits found.")
-            st.divider()
-            with st.expander("查看 AI 黑帽運算 (Debug)"):
-                st.image(mask_img, use_container_width=True, caption="Split Mask (Eroded)")
+            with st.container():
+                st.markdown(f"#### {status_icon} Digit #{item['id']} (Prediction: **{res['cnn_label']}**)")
+                
+                c_visual, c_stats, c_chart = st.columns([1, 2, 3])
+                
+                # [Col 1] 視覺化：模型看到的 28x28 Raw Input
+                with c_visual:
+                    # 放大顯示像素圖
+                    enlarged = cv2.resize(res['raw_img'], (150, 150), interpolation=cv2.INTER_NEAREST)
+                    st.image(enlarged, caption="28x28 Input (Raw)", clamp=True)
+                    st.caption(f"Conf: {res['cnn_conf']:.2f}")
+
+                # [Col 2] 數據：模型競技場
+                with c_stats:
+                    st.markdown("**Model Arena:**")
+                    match_data = {
+                        "Model": ["CNN", "KNN", "SVM"],
+                        "Pred": [res['cnn_label'], res['knn_label'], res['svm_label']]
+                    }
+                    st.dataframe(pd.DataFrame(match_data), hide_index=True, use_container_width=True)
+                    if not models_agree:
+                        st.error("模型意見分歧！")
+
+                # [Col 3] 圖表：機率分佈
+                with c_chart:
+                    st.markdown("**Probability Distribution (CNN):**")
+                    chart_df = pd.DataFrame({
+                        "Digit": list(range(10)),
+                        "Probability": res['probs']
+                    })
+                    st.bar_chart(chart_df, x="Digit", y="Probability", height=150)
+                
+                st.markdown("---")
+        
+        if len(digit_candidates) > limit:
+            st.info(f"還有 {len(digit_candidates) - limit} 個數字未顯示...")
 
 # ==========================================
-# 5. 主程式分流 (含歡迎頁面)
+# 5. 主程式入口
 # ==========================================
 def main():
-    try:
-        if 'page' not in st.session_state:
-            st.session_state['page'] = 'welcome'
+    st.title("🛠️ AI Developer Dashboard")
+    st.markdown("此工具專為 **開發者與資料科學家** 設計，用於分析模型行為、調整前處理參數與除錯。")
 
-        if st.session_state['page'] == 'welcome':
-            st.markdown("<br><br>", unsafe_allow_html=True)
-            c1, c2, c3 = st.columns([1, 2, 1])
-            with c2:
-                st.markdown("""
-                <div class="welcome-container">
-                    <div class="welcome-title">✒️ Handwriting AI</div>
-                    <div class="welcome-desc">
-                        智慧手寫數字辨識系統<br>
-                        支援即時鏡頭、手寫板、圖片上傳
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                if st.button("🚀 開始使用 / START", use_container_width=True, type="primary"):
-                    st.session_state['page'] = 'app'
-                    st.rerun()
+    # --- 側邊欄：開發者參數控制台 ---
+    with st.sidebar:
+        st.header("⚙️ Config Lab")
+        
+        st.subheader("1. 影像前處理 (Preprocessing)")
+        thresh_method = st.selectbox("二值化演算法", ["Adaptive Gaussian", "Otsu", "Simple"], index=0)
+        
+        block_size = 11
+        c_val = 10
+        if thresh_method == "Adaptive Gaussian":
+            block_size = st.slider("Block Size (奇數)", 3, 51, 15, step=2, help="決定局部閾值的區域大小")
+            c_val = st.slider("C Constant", 0, 50, 10, help="從平均值減去的常數")
+        
+        show_intermediate = st.checkbox("顯示中間運算圖 (Binary Output)", value=True)
+        
+        st.divider()
+        st.subheader("2. 模型資訊")
+        st.info(f"CNN: {'✅ Loaded' if cnn_model else '❌ Missing'}")
+        st.info(f"KNN: {'✅ Loaded' if knn_model else '⚠️ Training...'}")
+        st.info(f"SVM: {'✅ Loaded' if svm_model else '⚠️ Training...'}")
 
-        elif st.session_state['page'] == 'app':
-            st.title("HANDWRITING AI")
-            
-            st.sidebar.header("Settings")
-            mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
-            st.sidebar.divider()
-            
-            with st.sidebar.expander("🔧 Advanced Config", expanded=False):
-                st.markdown("""
-                <div class="guide-text">
-                <b>💡 調整指南</b><br>
-                • <b>Erosion</b>: 數字黏在一起時調大。<br>
-                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。<br>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # [V114] 移除按鈕，預設為 True
-                strict_mode = True 
-                
-                erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0)
-                dilation_iter = 0 
-                min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50)
-            
-            if st.sidebar.button("🏠 回到首頁"):
-                st.session_state['page'] = 'welcome'
-                st.rerun()
-
-            if cnn_model is None:
-                st.error("Model not found! 請確保 mnist_cnn.h5 存在")
-                st.stop()
-
-            if mode == "📷 鏡頭 (Live)":
-                run_camera_mode(erosion_iter, dilation_iter, min_conf, strict_mode)
-            elif mode == "✍️ 手寫板 (Canvas)":
-                run_canvas_mode(erosion_iter, dilation_iter, min_conf, strict_mode)
-            elif mode == "📂 上傳 (Upload)":
-                run_upload_mode(erosion_iter, dilation_iter, min_conf, strict_mode)
-            
-    except Exception as e:
-        st.error(f"程式執行發生錯誤: {e}")
+    # 目前僅開放 Lab Mode (因為這是 Developer Tool)
+    run_lab_mode(thresh_method, block_size, c_val, show_intermediate)
 
 if __name__ == "__main__":
     main()
