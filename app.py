@@ -19,14 +19,13 @@ from sklearn.svm import SVC
 st.set_page_config(page_title="Handwriting AI", page_icon="✒️", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-# [V86 鏡頭參數調校]
-# 降低穩定時間需求，提高反應速度
-STABILITY_DURATION = 0.8  
-# 大幅提高移動容忍值，手抖也不怕
-MOVEMENT_THRESHOLD = 150  
-ROI_MARGIN_X = 60         
-ROI_MARGIN_Y = 60         
-SHRINK_PX = 4             
+# [V87 舒適對焦參數]
+STABILITY_DURATION = 1.5  # 1.5秒：不快也不慢，剛好夠對準
+MOVEMENT_THRESHOLD = 120  # 容許手部自然晃動
+CONFIDENCE_THRESHOLD = 0.60 # 降低門檻，讓數字更容易被「吸住」
+ROI_MARGIN_X = 60
+ROI_MARGIN_Y = 60
+SHRINK_PX = 4
 
 st.markdown("""
 <style>
@@ -74,7 +73,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 共用核心 (V79/V83 邏輯保持不變)
+# 1. 共用核心 (保持 V79/V83 最佳邏輯)
 # ==========================================
 @st.cache_resource
 def load_models():
@@ -199,7 +198,7 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (V86 極速追焦)
+# 2. 鏡頭模式 (V87 舒適對焦)
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -208,19 +207,18 @@ class LiveProcessor(VideoProcessorBase):
         self.dilation = 2
         self.min_conf = 0.5
         
-        # 穩定度相關
         self.last_boxes = []
         self.stability_start_time = None
         self.frozen = False
         self.frozen_frame = None
         self.frame_counter = 0
         
-        # [V86 關鍵修正]
-        # 跳幀率改為 3 (每秒約偵測 10 次，視覺上很流暢)
-        self.skip_rate = 3  
+        # [V87 設定]
+        # 跳幀率 6 (約 5 FPS)：畫面不閃爍，但也跟得上移動
+        self.skip_rate = 6  
         self.cached_rois = []
         self.session_start_time = time.time()
-        self.warmup_duration = 1.0 # 暖身時間縮短
+        self.warmup_duration = 2.0 # 給使用者 2 秒鐘準備
 
     def update_params(self, ero, dil, conf):
         self.erosion = ero
@@ -237,7 +235,6 @@ class LiveProcessor(VideoProcessorBase):
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         
-        # 暖身
         if not hasattr(self, 'session_start_time') or self.session_start_time is None:
             self.session_start_time = time.time()
         is_warming_up = (time.time() - self.session_start_time) < self.warmup_duration
@@ -292,9 +289,12 @@ class LiveProcessor(VideoProcessorBase):
         
         for (x, y, w, h) in valid_boxes:
             roi = binary_proc[y:y+h, x:x+w]
-            final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
             
-            if final_conf > self.min_conf:
+            # 使用 CONFIDENCE_THRESHOLD (0.60) 進行寬鬆判定
+            final_lbl, final_conf, _ = ensemble_predict(roi, CONFIDENCE_THRESHOLD)
+            
+            # 只要超過寬鬆門檻就視為偵測到
+            if final_conf > CONFIDENCE_THRESHOLD:
                 detected_something = True
                 rx, ry = x + roi_rect[0], y + roi_rect[1]
                 box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
@@ -305,7 +305,7 @@ class LiveProcessor(VideoProcessorBase):
                 self.cached_rois.append((rx, ry, w, h, txt, box_color))
                 count_id += 1
 
-        # 穩定度與抓拍邏輯 (V86 修正版)
+        # 穩定度與抓拍邏輯
         if len(raw_boxes_for_stability) == 0:
             self.stability_start_time = None
         elif len(self.last_boxes) == 0:
@@ -313,7 +313,6 @@ class LiveProcessor(VideoProcessorBase):
             self.stability_start_time = time.time()
         else:
             total_movement = 0
-            # 簡易計算移動量
             for curr_box in raw_boxes_for_stability:
                 c_x, c_y, _, _ = curr_box["box"]
                 min_dist = 99999
@@ -321,20 +320,19 @@ class LiveProcessor(VideoProcessorBase):
                     l_x, l_y, _, _ = last_box["box"]
                     dist = abs(c_x - l_x) + abs(c_y - l_y)
                     if dist < min_dist: min_dist = dist
-                if min_dist < 50: total_movement += min_dist # 門檻放寬
+                if min_dist < 50: total_movement += min_dist
                 else: total_movement += 30 
             
             count_diff = abs(len(raw_boxes_for_stability) - len(self.last_boxes))
             total_movement += count_diff * 50 
             self.last_boxes = raw_boxes_for_stability
 
-            # 若移動量小且非暖身中 -> 開始集氣
+            # V87: 寬鬆的移動判定，確保不會一直斷掉
             if total_movement < MOVEMENT_THRESHOLD and not is_warming_up:
                 if self.stability_start_time is None: self.stability_start_time = time.time()
                 elapsed = time.time() - self.stability_start_time
                 progress = min(elapsed / STABILITY_DURATION, 1.0)
                 
-                # 藍色進度條
                 bar_y = h_f - 20 
                 bar_w = int(600 * progress)
                 color = (0, 255, 255) if progress < 1.0 else (0, 255, 0)
@@ -345,7 +343,7 @@ class LiveProcessor(VideoProcessorBase):
                     self.frozen = True
                     self.frozen_frame = display_img.copy()
             else:
-                self.stability_start_time = time.time() # 重置計時
+                self.stability_start_time = time.time()
                 if is_warming_up: 
                     cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
