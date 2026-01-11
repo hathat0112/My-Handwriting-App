@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V110)", 
+    page_title="Handwriting AI (V111)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -53,6 +53,11 @@ st.markdown("""
     .welcome-container {text-align: center; padding: 50px; border-radius: 15px; background: rgba(128, 128, 128, 0.1); margin-top: 50px;}
     .welcome-title {font-size: 3rem; font-weight: 700; margin-bottom: 1rem; color: #333;}
     .welcome-desc {font-size: 1.2rem; color: #666; margin-bottom: 2rem;}
+    
+    @media (prefers-color-scheme: dark) {
+        .welcome-title {color: #ddd;}
+        .welcome-desc {color: #aaa;}
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -113,25 +118,28 @@ except Exception as e:
     st.error(f"❌ 模型載入失敗: {e}")
     st.stop()
 
-# [V110 核心] 雙層處理邏輯
-# 1. 產生用於"定位"的影像 (嚴重腐蝕，為了切開)
+# [V110] 雙層處理邏輯
+# 1. 定位用影像 (腐蝕切割)
 def get_contour_mask(binary_img, erosion):
     res = binary_img.copy()
     if erosion > 0:
         kernel = np.ones((3,3), np.uint8)
         res = cv2.erode(res, kernel, iterations=erosion)
-    # 閉運算稍微修補一下斷裂
+    # 閉運算修補微小斷裂
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=1)
     return res
 
-# 2. 產生用於"辨識"的影像 (健康肥胖，為了AI)
+# 2. 辨識用影像 (原始飽滿)
 def get_prediction_img(binary_img, dilation):
     res = binary_img.copy()
-    iter_dil = max(1, dilation) # 至少膨脹一次，保證線條清晰
-    kernel_dil = np.ones((3,3), np.uint8)
-    res = cv2.dilate(res, kernel_dil, iterations=iter_dil)
+    # [V111 修正] 如果 dilation 為 0，就完全不膨脹 (手寫板專用)
+    if dilation > 0:
+        kernel_dil = np.ones((3,3), np.uint8)
+        res = cv2.dilate(res, kernel_dil, iterations=dilation)
     return res
+
+# [V111] 移除 v65_morphology，改用上方雙層邏輯
 
 def merge_nearby_boxes(boxes, distance_threshold=20):
     if not boxes: return []
@@ -195,8 +203,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255), is_dashed=False):
     (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
     
     if is_dashed:
-        # 畫虛線框 (黃色)
-        cv2.rectangle(img, (x, y), (x + lw + 10, y + 20), color, 1) # 簡單示意
+        cv2.rectangle(img, (x, y), (x + lw + 10, y + 20), color, 1)
     else:
         cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
         cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
@@ -249,7 +256,7 @@ class LiveProcessor(VideoProcessorBase):
     def __init__(self):
         self.model = cnn_model
         self.erosion = 0
-        self.dilation = 2 
+        self.dilation = 0 # [V111] 預設為 0
         self.min_conf = 0.50 
         self.strict_mode = False 
         
@@ -318,7 +325,7 @@ class LiveProcessor(VideoProcessorBase):
             cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             raw_boxes = []
-            min_area = 20 if self.erosion > 3 else 150 # [V110] 如果腐蝕大，容許面積就小
+            min_area = 20 if self.erosion > 3 else 150
             
             for c in cnts:
                 if cv2.contourArea(c) < min_area: continue 
@@ -335,8 +342,7 @@ class LiveProcessor(VideoProcessorBase):
             self.cached_rois = []
             
             for (x, y, w, h) in merged_boxes:
-                # [V110] 從胖胖的 pred_img 截圖，但要放大框框
-                pad = self.erosion * 2 # 補回被切掉的邊緣
+                pad = self.erosion * 2
                 roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
                                max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
                 
@@ -351,7 +357,7 @@ class LiveProcessor(VideoProcessorBase):
                     self.cached_rois.append((rx, ry, w, h, str(final_lbl), box_color, False))
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
                     draw_label(display_img, str(final_lbl), rx, ry, box_color, False)
-                elif self.strict_mode: # 被嚴格模式擋下的，顯示黃框
+                elif self.strict_mode:
                     box_color = (0, 255, 255)
                     self.cached_rois.append((rx, ry, w, h, "?", box_color, True))
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 1)
@@ -368,7 +374,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v110-cam", 
+            key="v111-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
@@ -447,7 +453,7 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
             cnts, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             raw_boxes = []
-            min_area = 50 if erosion > 3 else 400 # 腐蝕大則門檻低
+            min_area = 50 if erosion > 3 else 400 
             
             for c in cnts:
                 area = cv2.contourArea(c)
@@ -464,7 +470,6 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
             valid_count = 1
             
             for i, (x, y, w, h) in enumerate(merged_boxes):
-                # [V110] 放大框框取樣
                 pad = erosion * 2
                 roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
                                max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
@@ -480,7 +485,7 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                     results_list.append({"ID": f"#{valid_count}", "數字": str(final_lbl), "信心度": status_text})
                     valid_count += 1
                 elif strict_mode:
-                    cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 255), 1) # 黃色
+                    cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 255), 1)
             
             if results_list:
                 st.dataframe(results_list, hide_index=True, use_container_width=True)
@@ -546,7 +551,6 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
         
         valid_boxes_data = []
         for (x, y, w, h) in merged_boxes:
-            # 放大取樣
             pad = erosion * 2
             roi = pred_img[max(0, y-pad):min(pred_img.shape[0], y+h+pad), 
                            max(0, x-pad):min(pred_img.shape[1], x+w+pad)]
@@ -554,7 +558,6 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             if roi.size == 0: continue
             
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
-            
             if final_lbl != -1 and final_conf > min_conf:
                 valid_boxes_data.append({'rect': (x,y,w,h), 'lbl': final_lbl, 'conf': final_conf, 'details': details})
 
@@ -621,14 +624,14 @@ def main():
                 <div class="guide-text">
                 <b>💡 調整指南</b><br>
                 • <b>Strict Mode</b>: 打勾後，非數字的塗鴉會被過濾。<br>
-                • <b>Erosion</b>: 數字黏在一起時調大 (現在有效了!)。<br>
-                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。
+                • <b>Erosion</b>: 數字黏在一起時調大。<br>
                 </div>
                 """, unsafe_allow_html=True)
                 
                 strict_mode = st.checkbox("Strict Mode (嚴格過濾)", value=True, help="若模型意見不合，則不顯示結果")
                 erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0)
-                dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2)
+                # Dilation 拉桿已移除，程式內部強制為 0
+                dilation_iter = 0 
                 min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50)
             
             if st.sidebar.button("🏠 回到首頁"):
