@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V121)", 
+    page_title="Handwriting AI (V122)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -227,7 +227,7 @@ def ensemble_predict(roi, min_conf, strict_mode=False):
     if knn_model and lbl_knn == lbl_cnn: agree_count += 1
     if svm_model and lbl_svm == lbl_cnn: agree_count += 1
     
-    # 嚴格模式：如果開啟，會進行高標準過濾
+    # 嚴格模式邏輯：只在 Strict Mode = True 時執行
     if strict_mode:
         if (knn_model and lbl_knn != lbl_cnn) or (svm_model and lbl_svm != lbl_cnn):
             if final_conf < 0.85:
@@ -447,7 +447,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
         )
     with col2:
         if ctx.video_processor:
-            # 鏡頭模式：強制開啟 Strict Mode
+            # 鏡頭模式：維持 Strict Mode = True
             ctx.video_processor.update_params(erosion, dilation, min_conf, strict_mode=True)
             if st.button("🔄 重新掃描", use_container_width=True):
                 ctx.video_processor.resume()
@@ -534,7 +534,7 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 
                 if roi.size == 0: continue
                 
-                # [V121] 手寫板：強制開啟 Strict Mode，過濾笑臉
+                # 手寫板模式：維持 Strict Mode = True 以過濾笑臉
                 if not check_complexity(roi): continue
 
                 final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=True)
@@ -615,10 +615,10 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             
             if roi.size == 0: continue
             
-            if not check_complexity(roi): continue
+            # [V122] 上傳模式：不檢查複雜度，不啟用 Strict Mode
+            # if not check_complexity(roi): continue # 移除這行，允許複雜/雜訊的數字
 
-            # [V121] 上傳模式：強制關閉 Strict Mode，確保陰影下的數字能顯示
-            final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False)
+            final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False) # 強制 False
             
             if final_lbl != -1 and final_conf > min_conf:
                 valid_boxes_data.append({'rect': (x,y,w,h), 'lbl': final_lbl, 'conf': final_conf, 'details': details})
@@ -691,7 +691,6 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # 全域預設為 True，但各模式會覆寫
                 strict_mode = True 
                 erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0)
                 dilation_iter = 0 
