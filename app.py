@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V104)", 
+    page_title="Handwriting AI (V106)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -24,7 +24,6 @@ from tensorflow.keras.datasets import mnist
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
-# 環境變數
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # 參數設定
@@ -34,7 +33,6 @@ ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
-# WebRTC 設定
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
@@ -120,31 +118,51 @@ except Exception as e:
     st.error(f"❌ 模型載入失敗: {e}")
     st.stop()
 
-# [V104 關鍵] 智慧濾網：先去除噪點，再連接筆畫
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
-    
-    # 1. 開運算 (Open): 先腐蝕再膨脹 -> 用來去除像鹽巴一樣的小白點
-    kernel_clean = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    res = cv2.morphologyEx(res, cv2.MORPH_OPEN, kernel_clean, iterations=1)
-    
-    # 2. 閉運算 (Close): 先膨脹再腐蝕 -> 用來把斷掉的筆畫接起來
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=2)
-    
-    # 3. 膨脹 (Dilation): 讓筆畫變粗 (V104 改回由參數控制，不再強制大核心)
-    if dilation > 0:
-        res = cv2.dilate(res, None, iterations=dilation)
-        
+    iter_dil = max(1, dilation)
+    kernel_dil = np.ones((3,3), np.uint8)
+    res = cv2.dilate(res, kernel_dil, iterations=iter_dil)
     return res
 
-def center_by_moments(img):
-    m = cv2.moments(img, True)
-    if m['m00'] < 0.1: return cv2.resize(img, (28, 28))
-    cX, cY = m['m10'] / m['m00'], m['m01'] / m['m00']
-    tX, tY = 14.0 - cX, 14.0 - cY
-    M = np.float32([[1, 0, tX], [0, 1, tY]])
-    return cv2.warpAffine(img, M, (28, 28), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+def merge_nearby_boxes(boxes, distance_threshold=20):
+    if not boxes: return []
+    rects = []
+    for (x, y, w, h) in boxes:
+        rects.append([x, y, x+w, y+h])
+    rects = np.array(rects)
+    
+    while True:
+        merged = False
+        new_rects = []
+        used = [False] * len(rects)
+        
+        for i in range(len(rects)):
+            if used[i]: continue
+            x1, y1, x2, y2 = rects[i]
+            for j in range(i + 1, len(rects)):
+                if used[j]: continue
+                ox1, oy1, ox2, oy2 = rects[j]
+                dist_x = max(0, x1 - ox2) + max(0, ox1 - x2)
+                dist_y = max(0, y1 - oy2) + max(0, oy1 - y2)
+                if dist_x < distance_threshold and dist_y < distance_threshold:
+                    x1 = min(x1, ox1)
+                    y1 = min(y1, oy1)
+                    x2 = max(x2, ox2)
+                    y2 = max(y2, oy2)
+                    used[j] = True
+                    merged = True
+            new_rects.append([x1, y1, x2, y2])
+            
+        if not merged: break
+        rects = np.array(new_rects)
+
+    final_boxes = []
+    for (x1, y1, x2, y2) in rects:
+        final_boxes.append((x1, y1, x2-x1, y2-y1))
+    return final_boxes
 
 def preprocess_input(roi):
     h, w = roi.shape
@@ -154,9 +172,17 @@ def preprocess_input(roi):
     canvas = np.zeros((28, 28), dtype=np.uint8)
     y_off, x_off = (28 - nh) // 2, (28 - nw) // 2
     canvas[y_off:y_off+nh, x_off:x_off+nw] = resized
-    final = center_by_moments(canvas)
-    cnn_in = final.reshape(1, 28, 28, 1).astype('float32') / 255.0
-    flat_in = final.reshape(1, 784).astype('float32') / 255.0
+    
+    # 再次使用中心矩對齊
+    m = cv2.moments(canvas, True)
+    if m['m00'] > 0.1:
+        cX, cY = m['m10'] / m['m00'], m['m01'] / m['m00']
+        tX, tY = 14.0 - cX, 14.0 - cY
+        M = np.float32([[1, 0, tX], [0, 1, tY]])
+        canvas = cv2.warpAffine(canvas, M, (28, 28), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        
+    cnn_in = canvas.reshape(1, 28, 28, 1).astype('float32') / 255.0
+    flat_in = canvas.reshape(1, 784).astype('float32') / 255.0
     return cnn_in, flat_in
 
 def draw_label(img, text, x, y, color=(0, 255, 255)):
@@ -167,8 +193,8 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [CNN 優先邏輯]
-def ensemble_predict(roi, min_conf):
+# [V106 核心] 嚴格模式：如果大家意見不合，就當作沒看到
+def ensemble_predict(roi, min_conf, strict_mode=False):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
     lbl_cnn = np.argmax(pred_cnn)
@@ -187,6 +213,16 @@ def ensemble_predict(roi, min_conf):
     if knn_model and lbl_knn == lbl_cnn: agree_count += 1
     if svm_model and lbl_svm == lbl_cnn: agree_count += 1
     
+    # [V106] 嚴格模式邏輯
+    if strict_mode:
+        # 只要有一個模型反對，就直接淘汰 (回傳 -1)
+        if (knn_model and lbl_knn != lbl_cnn) or (svm_model and lbl_svm != lbl_cnn):
+            return -1, 0.0, " (Disagree)"
+        
+        # 即使大家同意，信心度不夠高也淘汰
+        if final_conf < 0.8:
+            return -1, 0.0, " (Low Conf)"
+
     if agree_count == 2:
         final_conf = min(0.99, final_conf + 0.05)
     else:
@@ -203,31 +239,31 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (V104: 智慧濾網 + 形狀快篩)
+# 2. 鏡頭模式
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
         self.model = cnn_model
         self.erosion = 0
-        self.dilation = 2 # [V104] 改回 2，避免雜訊過度膨脹
-        self.min_conf = 0.50 # [V104] 改回 0.5，避免誤判
+        self.dilation = 2 
+        self.min_conf = 0.50 
+        self.strict_mode = False # 鏡頭模式預設不嚴格，不然會很難抓
         
         self.last_boxes = []
         self.stability_start_time = None
         self.frozen = False
         self.frozen_frame = None
-        
         self.cached_rois = [] 
         self.last_process_time = 0 
         self.process_interval = 0.25 
-        
         self.session_start_time = time.time()
         self.warmup_duration = 2.0 
 
-    def update_params(self, ero, dil, conf):
+    def update_params(self, ero, dil, conf, strict):
         self.erosion = ero
         self.dilation = dil
         self.min_conf = conf
+        self.strict_mode = strict
 
     def resume(self):
         self.frozen = False
@@ -240,7 +276,6 @@ class LiveProcessor(VideoProcessorBase):
         try:
             img = frame.to_ndarray(format="bgr24")
             current_time = time.time()
-            
             if not hasattr(self, 'session_start_time') or self.session_start_time is None:
                 self.session_start_time = current_time
             is_warming_up = (current_time - self.session_start_time) < self.warmup_duration
@@ -265,50 +300,39 @@ class LiveProcessor(VideoProcessorBase):
                 return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
             self.last_process_time = current_time
-            
             roi_img = img[roi_rect[1]:roi_rect[1]+roi_rect[3], roi_rect[0]:roi_rect[0]+roi_rect[2]]
             if roi_img.size == 0: return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
-            # [V104] 移除銳化，避免噪點增強
             gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
             blur = cv2.GaussianBlur(gray, (5, 5), 0) 
             binary = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10)
             binary_proc = v65_morphology(binary, self.erosion, self.dilation)
-            
             cnts, _ = cv2.findContours(binary_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            valid_boxes = []
             
+            raw_boxes = []
             for c in cnts:
                 area = cv2.contourArea(c)
-                # [V104] 門檻調回 150，過濾極小噪點
                 if area < 150: continue 
                 x, y, w, h = cv2.boundingRect(c)
                 if x<5 or y<5: continue
-                
-                # [V104 關鍵] 形狀快篩：過濾不合理的形狀
                 aspect_ratio = w / float(h)
-                # 1. 排除太寬的 (像是橫線陰影)
                 if aspect_ratio > 1.5: continue 
-                # 2. 排除太扁的 (高度太低)
                 if h < 15: continue
-                # 3. 排除太靠近左邊邊緣的 (筆記本打孔洞)
                 if x < 10: continue 
-                
-                valid_boxes.append((x,y,w,h))
+                raw_boxes.append((x,y,w,h))
             
-            valid_boxes.sort(key=lambda b: b[0])
+            merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=20)
+            merged_boxes.sort(key=lambda b: b[0])
             self.cached_rois = []
-            detected_something = False
             
-            for (x, y, w, h) in valid_boxes:
+            for (x, y, w, h) in merged_boxes:
                 roi = binary_proc[y:y+h, x:x+w]
-                final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf)
+                final_lbl, final_conf, _ = ensemble_predict(roi, self.min_conf, self.strict_mode)
                 
-                if final_conf > self.min_conf:
-                    detected_something = True
+                # 若被嚴格模式過濾 (return -1)，就不顯示
+                if final_lbl != -1 and final_conf > self.min_conf:
                     rx, ry = x + roi_rect[0], y + roi_rect[1]
                     box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
-                    
                     txt = str(final_lbl) 
                     self.cached_rois.append((rx, ry, w, h, txt, box_color))
                     cv2.rectangle(display_img, (rx, ry), (rx+w, ry+h), box_color, 2)
@@ -321,12 +345,12 @@ class LiveProcessor(VideoProcessorBase):
         except Exception as e:
             return av.VideoFrame.from_ndarray(frame.to_ndarray(format="bgr24"), format="bgr24")
 
-def run_camera_mode(erosion, dilation, min_conf):
+def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     st.caption("請將數字置於鏡頭中央，穩定後自動抓拍")
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v104-cam", 
+            key="v106-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
@@ -341,7 +365,7 @@ def run_camera_mode(erosion, dilation, min_conf):
         )
     with col2:
         if ctx.video_processor:
-            ctx.video_processor.update_params(erosion, dilation, min_conf)
+            ctx.video_processor.update_params(erosion, dilation, min_conf, strict_mode)
             if st.button("🔄 重新掃描", use_container_width=True):
                 ctx.video_processor.resume()
             if ctx.video_processor.frozen:
@@ -350,9 +374,9 @@ def run_camera_mode(erosion, dilation, min_conf):
                 st.info("⏳ 偵測中...")
 
 # ==========================================
-# 3. 手寫板模式
+# 3. 手寫板模式 (V106: 專用優化)
 # ==========================================
-def run_canvas_mode(erosion, dilation, min_conf):
+def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
     if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
 
@@ -399,28 +423,31 @@ def run_canvas_mode(erosion, dilation, min_conf):
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed = v65_morphology(binary, erosion, dilation)
             
-            merge_kernel = np.ones((4, 4), np.uint8) 
-            merged_mask = cv2.dilate(processed, merge_kernel, iterations=2)
-            cnts, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # 手寫板不做形狀過濾，但大幅提高面積門檻以過濾噪點
+            cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            valid_boxes = []
+            raw_boxes = []
             for c in cnts:
                 area = cv2.contourArea(c)
-                if area < 150: continue 
+                # [V106] 手寫板門檻調高到 400，避免抓到細小雜點
+                if area < 400: continue 
                 x, y, w, h = cv2.boundingRect(c)
-                if h < 15 or w < 5: continue 
-                valid_boxes.append((x,y,w,h))
+                if h < 20 or w < 10: continue 
+                raw_boxes.append((x,y,w,h))
             
-            boxes = sorted(valid_boxes, key=lambda b: b[0])
+            merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=30)
+            merged_boxes.sort(key=lambda b: b[0])
+            
             draw_img = img_bgr.copy()
             results_list = []
             valid_count = 1
             
-            for i, (x, y, w, h) in enumerate(boxes):
+            for i, (x, y, w, h) in enumerate(merged_boxes):
                 roi = processed[y:y+h, x:x+w]
-                final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
+                final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
                 
-                if final_conf > min_conf:
+                # 如果不是 -1 (被嚴格模式刷掉) 且信心度夠高才顯示
+                if final_lbl != -1 and final_conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
                     draw_label(draw_img, f"#{valid_count}", x, y)
                     status_text = f"{int(final_conf*100)}%{details}"
@@ -438,9 +465,9 @@ def run_canvas_mode(erosion, dilation, min_conf):
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (V98: 邊緣過濾)
+# 4. 上傳模式
 # ==========================================
-def run_upload_mode(erosion, dilation, min_conf):
+def run_upload_mode(erosion, dilation, min_conf, strict_mode):
     file = st.file_uploader("Drop an image here", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
     
     if not file:
@@ -463,7 +490,6 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # BlackHat 運算
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
@@ -475,24 +501,26 @@ def run_upload_mode(erosion, dilation, min_conf):
         
         cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        valid_boxes_data = []
+        raw_boxes = []
         for c in cnts:
             area = cv2.contourArea(c)
             if area < 80: continue 
             x, y, w, h = cv2.boundingRect(c)
             if w < 10 and h < 10: continue
             if w * h > (img_h * img_w * 0.9): continue
-            
-            # 邊緣過濾
             if y + h > img_h - 10: continue 
-
+            raw_boxes.append((x,y,w,h))
+            
+        merged_boxes = merge_nearby_boxes(raw_boxes, distance_threshold=25)
+        merged_boxes.sort(key=lambda item: (item[1]//50, item[0]))
+        
+        valid_boxes_data = []
+        for (x, y, w, h) in merged_boxes:
             roi = processed[y:y+h, x:x+w]
-            final_lbl, final_conf, details = ensemble_predict(roi, min_conf)
-            if final_conf > min_conf:
+            final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode)
+            if final_lbl != -1 and final_conf > min_conf:
                 valid_boxes_data.append({'rect': (x,y,w,h), 'lbl': final_lbl, 'conf': final_conf, 'details': details})
 
-        valid_boxes_data.sort(key=lambda item: (item['rect'][1]//50, item['rect'][0]))
-        
         c1, c2 = st.columns([1.5, 1], gap="large")
         with c1:
             display_img = img_origin.copy()
@@ -555,15 +583,18 @@ def main():
                 st.markdown("""
                 <div class="guide-text">
                 <b>💡 調整指南</b><br>
-                • <b>Erosion (瘦身)</b>: 數字黏在一起時調大。<br>
-                • <b>Dilation (增肥)</b>: 筆畫太淡或斷掉時調大。<br>
-                • <b>Confidence</b>: 雜訊太多時調高。
+                • <b>Strict Mode</b>: 打勾後，非數字的塗鴉會被過濾。<br>
+                • <b>Erosion</b>: 數字黏在一起時調大。<br>
+                • <b>Dilation</b>: 筆畫太淡或斷掉時調大。
                 </div>
                 """, unsafe_allow_html=True)
                 
-                erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0, help="把線條變細，用來分開黏在一起的字")
-                dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2, help="把線條變粗，用來連接斷掉的筆畫") # 回歸預設值
-                min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字")
+                # [V106] 新增嚴格模式開關，預設開啟
+                strict_mode = st.checkbox("Strict Mode (嚴格過濾)", value=True, help="若模型意見不合，則不顯示結果")
+                
+                erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0)
+                dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2)
+                min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50)
             
             if st.sidebar.button("🏠 回到首頁"):
                 st.session_state['page'] = 'welcome'
@@ -574,11 +605,11 @@ def main():
                 st.stop()
 
             if mode == "📷 鏡頭 (Live)":
-                run_camera_mode(erosion_iter, dilation_iter, min_conf)
+                run_camera_mode(erosion_iter, dilation_iter, min_conf, strict_mode)
             elif mode == "✍️ 手寫板 (Canvas)":
-                run_canvas_mode(erosion_iter, dilation_iter, min_conf)
+                run_canvas_mode(erosion_iter, dilation_iter, min_conf, strict_mode)
             elif mode == "📂 上傳 (Upload)":
-                run_upload_mode(erosion_iter, dilation_iter, min_conf)
+                run_upload_mode(erosion_iter, dilation_iter, min_conf, strict_mode)
             
     except Exception as e:
         st.error(f"程式執行發生錯誤: {e}")
