@@ -4,10 +4,10 @@ import streamlit as st
 # 0. 頁面設定 (強制展開側邊欄！)
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V92)", 
+    page_title="Handwriting AI (V93)", 
     page_icon="✒️", 
     layout="wide",
-    initial_sidebar_state="expanded"  # 強制展開側邊欄
+    initial_sidebar_state="expanded"  # [修正 1] 強制展開側邊欄
 )
 
 import cv2
@@ -35,13 +35,15 @@ ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
-# 極簡 CSS 風格
+# [修正 2] 移除 header: hidden，確保選單按鈕可見
 st.markdown("""
 <style>
-    #MainMenu {visibility: hidden;}
+    /* 只隱藏 footer，保留 header 以顯示選單按鈕 */
+    #MainMenu {visibility: visible;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
+    
     .block-container {padding-top: 2rem; padding-bottom: 2rem;}
+    
     .stButton>button {
         background-color: #2b2b2b;
         color: white;
@@ -56,27 +58,16 @@ st.markdown("""
         transform: translateY(-2px);
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
-    h1 {
-        text-align: center;
-        font-weight: 300 !important;
-        letter-spacing: 2px;
-        margin-bottom: 2rem !important;
-    }
+    
+    /* 側邊欄樣式優化 */
     section[data-testid="stSidebar"] {
         background-color: #f8f9fa;
         border-right: 1px solid #eaeaea;
     }
-    div[data-testid="stVerticalBlock"] > div {
-        border-radius: 10px;
-    }
-    .guide-text {
-        font-size: 0.85rem;
-        color: #666;
-        line-height: 1.5;
-        background-color: #f1f3f5;
-        padding: 10px;
-        border-radius: 8px;
-        margin-bottom: 15px;
+    
+    /* 讓側邊欄內容更緊湊 */
+    section[data-testid="stSidebar"] .block-container {
+        padding-top: 2rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -570,6 +561,7 @@ def run_upload_mode(erosion, dilation, min_conf):
 # ==========================================
 def main():
     try:
+        st.title("HANDWRITING AI")
         st.sidebar.header("Settings")
         mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
         
@@ -590,7 +582,7 @@ def main():
             min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字")
 
         if cnn_model is None:
-            st.error("Model not found!")
+            st.error("Model not found! 請確保 mnist_cnn.h5 存在")
             st.stop()
 
         if mode == "📷 鏡頭 (Live)":
