@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V120)", 
+    page_title="Handwriting AI (V121)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -132,23 +132,16 @@ def get_prediction_img(binary_img, dilation):
         res = cv2.dilate(res, kernel_dil, iterations=dilation)
     return res
 
-# [V120 改良] 複雜度檢查：忽略微小的雜訊洞
 def check_complexity(roi):
     cnts, hierarchy = cv2.findContours(roi, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     if len(cnts) <= 1: return True
-    
     internal_shapes = 0
     if hierarchy is not None:
-        # 遍歷所有輪廓
         for i, h in enumerate(hierarchy[0]):
-            # 如果這個輪廓有父節點 (h[3] != -1)，代表它是洞
             if h[3] != -1:
-                # [V120] 檢查這個洞的大小
                 hole_area = cv2.contourArea(cnts[i])
-                # 只有大於 5 像素的洞才算數，忽略陰影造成的噪點
                 if hole_area > 5:
                     internal_shapes += 1
-    
     if internal_shapes > 2:
         return False 
     return True
@@ -234,7 +227,7 @@ def ensemble_predict(roi, min_conf, strict_mode=False):
     if knn_model and lbl_knn == lbl_cnn: agree_count += 1
     if svm_model and lbl_svm == lbl_cnn: agree_count += 1
     
-    # 嚴格模式：只在鏡頭模式下啟用，上傳模式強制關閉
+    # 嚴格模式：如果開啟，會進行高標準過濾
     if strict_mode:
         if (knn_model and lbl_knn != lbl_cnn) or (svm_model and lbl_svm != lbl_cnn):
             if final_conf < 0.85:
@@ -454,7 +447,8 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
         )
     with col2:
         if ctx.video_processor:
-            ctx.video_processor.update_params(erosion, dilation, min_conf, strict_mode)
+            # 鏡頭模式：強制開啟 Strict Mode
+            ctx.video_processor.update_params(erosion, dilation, min_conf, strict_mode=True)
             if st.button("🔄 重新掃描", use_container_width=True):
                 ctx.video_processor.resume()
             if ctx.video_processor.frozen:
@@ -540,9 +534,10 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 
                 if roi.size == 0: continue
                 
+                # [V121] 手寫板：強制開啟 Strict Mode，過濾笑臉
                 if not check_complexity(roi): continue
 
-                final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False)
+                final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=True)
                 
                 if final_lbl != -1 and final_conf > min_conf:
                     cv2.rectangle(draw_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
@@ -622,7 +617,7 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             
             if not check_complexity(roi): continue
 
-            # [V120] 上傳模式強制關閉嚴格模式，確保陰影下的數字能顯示
+            # [V121] 上傳模式：強制關閉 Strict Mode，確保陰影下的數字能顯示
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False)
             
             if final_lbl != -1 and final_conf > min_conf:
@@ -696,6 +691,7 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
                 
+                # 全域預設為 True，但各模式會覆寫
                 strict_mode = True 
                 erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0)
                 dilation_iter = 0 
