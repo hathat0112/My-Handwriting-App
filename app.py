@@ -19,7 +19,7 @@ from sklearn.svm import SVC
 st.set_page_config(page_title="Handwriting AI", page_icon="✒️", layout="wide")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-# 自定義 CSS：極簡黑白風格
+# 自定義 CSS：極簡黑白風格 + Tooltip 優化
 st.markdown("""
 <style>
     /* 隱藏預設選單與 Footer */
@@ -67,11 +67,22 @@ st.markdown("""
     div[data-testid="stVerticalBlock"] > div {
         border-radius: 10px;
     }
+    
+    /* 說明文字風格 */
+    .guide-text {
+        font-size: 0.85rem;
+        color: #666;
+        line-height: 1.5;
+        background-color: #f1f3f5;
+        padding: 10px;
+        border-radius: 8px;
+        margin-bottom: 15px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 共用核心 (V79 Vengeance 邏輯)
+# 1. 共用核心 (V79 BlackHat 邏輯)
 # ==========================================
 @st.cache_resource
 def load_models():
@@ -252,18 +263,16 @@ def run_camera_mode(erosion, dilation, min_conf):
         ctx.video_processor.update_params(erosion, dilation, min_conf)
 
 # ==========================================
-# 3. 手寫板模式 (極簡化)
+# 3. 手寫板模式
 # ==========================================
 def run_canvas_mode(erosion, dilation, min_conf):
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
     if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
 
-    # 極簡排版：左邊畫布，右邊結果
     c1, c2 = st.columns([1.8, 1.2], gap="large")
     
     with c1:
         st.subheader("Canvas")
-        # 工具列簡化
         t1, t2, t3 = st.columns([2, 1, 1])
         with t1:
             tool_mode = st.radio("工具", ["✏️ 畫筆", "🧽 橡皮擦"], horizontal=True, label_visibility="collapsed")
@@ -332,24 +341,21 @@ def run_canvas_mode(erosion, dilation, min_conf):
                     results_list.append({"ID": f"#{valid_count}", "數字": str(final_lbl), "信心度": status_text})
                     valid_count += 1
             
-            # 結果顯示 (只顯示表格，不顯示複雜的 Debug 圖)
             if results_list:
                 st.dataframe(results_list, hide_index=True, use_container_width=True)
             else:
                 st.info("Waiting for input...")
                 
-            # 將 Debug 圖藏在摺疊選單中
             with st.expander("查看 AI 視覺 (Debug)"):
                 st.image(draw_img, caption="Detection", channels="BGR", use_container_width=True)
         else:
             st.markdown("*Ready to analyze...*")
 
 # ==========================================
-# 4. 上傳模式 (V79 Shadow Hunter 核心)
+# 4. 上傳模式 (V79 BlackHat 核心)
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf):
     
-    # 隱藏式上傳區
     file = st.file_uploader("Drop an image here", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
     
     if not file:
@@ -370,7 +376,6 @@ def run_upload_mode(erosion, dilation, min_conf):
             
         gray = cv2.cvtColor(img_origin, cv2.COLOR_BGR2GRAY)
         
-        # BlackHat 核心
         kernel_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_hat)
         blackhat_enhanced = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
@@ -396,7 +401,6 @@ def run_upload_mode(erosion, dilation, min_conf):
 
         valid_boxes_data.sort(key=lambda item: (item['rect'][1]//50, item['rect'][0]))
         
-        # 左右佈局
         c1, c2 = st.columns([1.5, 1], gap="large")
         
         with c1:
@@ -430,16 +434,25 @@ def run_upload_mode(erosion, dilation, min_conf):
 def main():
     st.title("HANDWRITING AI")
     
-    # 側邊欄極簡化
     st.sidebar.header("Settings")
     mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"])
     
     st.sidebar.divider()
     
-    with st.sidebar.expander("Advanced Config"):
-        erosion_iter = st.slider("Erosion", 0, 5, 0)
-        dilation_iter = st.slider("Dilation", 0, 3, 2)
-        min_conf = st.slider("Confidence", 0.0, 1.0, 0.50)
+    # [新增] 參數調整指南 & Tooltips
+    with st.sidebar.expander("🔧 Advanced Config", expanded=False):
+        st.markdown("""
+        <div class="guide-text">
+        <b>💡 調整指南</b><br>
+        • <b>Erosion (瘦身)</b>: 數字黏在一起時調大。<br>
+        • <b>Dilation (增肥)</b>: 筆畫太淡或斷掉時調大。<br>
+        • <b>Confidence</b>: 雜訊太多時調高。
+        </div>
+        """, unsafe_allow_html=True)
+        
+        erosion_iter = st.slider("Erosion (切割沾黏)", 0, 5, 0, help="把線條變細，用來分開黏在一起的字")
+        dilation_iter = st.slider("Dilation (筆畫加粗)", 0, 3, 2, help="把線條變粗，用來連接斷掉的筆畫")
+        min_conf = st.slider("Confidence (信心門檻)", 0.0, 1.0, 0.50, help="AI 的最低信心標準，太低會顯示雜訊，太高會漏字")
 
     if cnn_model is None:
         st.error("Model not found!")
