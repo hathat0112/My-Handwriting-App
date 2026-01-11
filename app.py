@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V125)", 
+    page_title="Handwriting AI (V126)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -438,16 +438,17 @@ class LiveProcessor(VideoProcessorBase):
         cv2.putText(img, status_text, (10, bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, bar_color, 2)
 
 def run_camera_mode(erosion, dilation, min_conf, strict_mode):
-    # [V125] 新增說明書 (Expander)
+    # [V126] 更新操作指南
     with st.expander("📖 操作指南 (How to use)"):
         st.markdown("""
         <div class="manual-box">
             <div class="manual-title">📸 鏡頭模式使用技巧</div>
             <div class="manual-text">
             1. <b>對準藍框</b>：請將數字置於畫面中央的藍色框框內。<br>
-            2. <b>保持穩定</b>：當偵測到數字時，下方會出現<b>黃色進度條</b>。請保持手機或紙張<b>完全靜止</b>。<br>
-            3. <b>自動抓拍</b>：倒數 3 秒結束後，進度條變綠，畫面會自動凍結並顯示結果。<br>
-            4. <b>重新開始</b>：點擊右上角的「🔄 重新掃描」按鈕即可解除凍結。
+            2. <b>拿近一點</b>：如果數字太小 AI 會看不清楚，<b>請將紙張拿靠近鏡頭</b>，讓數字佔據藍框的一定大小。<br>
+            3. <b>保持穩定</b>：當偵測到數字時，下方會出現<b>黃色進度條</b>。請保持手機或紙張<b>完全靜止</b>。<br>
+            4. <b>自動抓拍</b>：倒數 3 秒結束後，進度條變綠，畫面會自動凍結並顯示結果。<br>
+            5. <b>重新開始</b>：點擊右上角的「🔄 重新掃描」按鈕即可解除凍結。
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -455,7 +456,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v125-cam", 
+            key="v126-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
@@ -485,7 +486,6 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
     if 'canvas_json' not in st.session_state: st.session_state['canvas_json'] = None
     if 'initial_drawing' not in st.session_state: st.session_state['initial_drawing'] = None
 
-    # [V125] 新增說明書
     with st.expander("📖 操作指南 (How to use)"):
         st.markdown("""
         <div class="manual-box">
@@ -570,7 +570,6 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
                 
                 if roi.size == 0: continue
                 
-                # 手寫板模式：維持 Strict Mode = True 以過濾笑臉
                 if not check_complexity(roi): continue
 
                 final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=True)
@@ -593,7 +592,6 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
 # 4. 上傳模式
 # ==========================================
 def run_upload_mode(erosion, dilation, min_conf, strict_mode):
-    # [V125] 新增說明書
     with st.expander("📖 操作指南 (How to use)"):
         st.markdown("""
         <div class="manual-box">
@@ -661,7 +659,6 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             
             if roi.size == 0: continue
             
-            # [V122] 上傳模式：不檢查複雜度，不啟用 Strict Mode
             final_lbl, final_conf, details = ensemble_predict(roi, min_conf, strict_mode=False)
             
             if final_lbl != -1 and final_conf > min_conf:
