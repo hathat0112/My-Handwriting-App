@@ -1,13 +1,13 @@
 import streamlit as st
 
 # ==========================================
-# 0. 頁面設定 (強制展開側邊欄！)
+# 0. 頁面設定 (強制展開側邊欄 + 寬版佈局)
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V93)", 
+    page_title="Handwriting AI (V94)", 
     page_icon="✒️", 
     layout="wide",
-    initial_sidebar_state="expanded"  # [修正 1] 強制展開側邊欄
+    initial_sidebar_state="expanded"  # [關鍵修正] 強制展開側邊欄清單
 )
 
 import cv2
@@ -28,25 +28,42 @@ from sklearn.svm import SVC
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # [V90 鏡頭參數：舒適對焦設定]
-STABILITY_DURATION = 1.5    # 1.5秒：對準後稍停即拍
-MOVEMENT_THRESHOLD = 120    # 容許手部自然晃動
-CONFIDENCE_THRESHOLD = 0.60 # 降低門檻，讓數字更容易被「吸住」
+STABILITY_DURATION = 1.5    
+MOVEMENT_THRESHOLD = 120    
+CONFIDENCE_THRESHOLD = 0.60 
 ROI_MARGIN_X = 60
 ROI_MARGIN_Y = 60
 SHRINK_PX = 4
 
-# [修正 2] 移除 header: hidden，確保選單按鈕可見
+# [V94 介面強力修復]
 st.markdown("""
 <style>
-    /* 只隱藏 footer，保留 header 以顯示選單按鈕 */
-    #MainMenu {visibility: visible;}
-    footer {visibility: hidden;}
+    /* 1. 強制背景為白色 (解決深色模式怪怪的問題) */
+    .stApp {
+        background-color: #ffffff;
+    }
     
-    .block-container {padding-top: 2rem; padding-bottom: 2rem;}
+    /* 2. 強制側邊欄為亮灰色 */
+    section[data-testid="stSidebar"] {
+        background-color: #f8f9fa;
+        border-right: 1px solid #eaeaea;
+    }
     
+    /* 3. 強制文字顏色為深黑 (避免在白底上顯示白字) */
+    h1, h2, h3, h4, h5, h6, p, span, label, div, .stMarkdown {
+        color: #31333F !important;
+    }
+    
+    /* 4. 確保左上角選單按鈕永遠可見 */
+    header[data-testid="stHeader"] {
+        background-color: rgba(0,0,0,0);
+        visibility: visible !important;
+    }
+    
+    /* 5. 按鈕樣式優化 (黑底白字) */
     .stButton>button {
-        background-color: #2b2b2b;
-        color: white;
+        background-color: #2b2b2b !important;
+        color: white !important;
         border-radius: 8px;
         border: none;
         padding: 0.5rem 1rem;
@@ -54,20 +71,17 @@ st.markdown("""
         transition: all 0.3s ease;
     }
     .stButton>button:hover {
-        background-color: #4a4a4a;
+        background-color: #4a4a4a !important;
         transform: translateY(-2px);
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
     
-    /* 側邊欄樣式優化 */
-    section[data-testid="stSidebar"] {
-        background-color: #f8f9fa;
-        border-right: 1px solid #eaeaea;
-    }
+    /* 6. 隱藏頁尾 */
+    footer {visibility: hidden;}
     
-    /* 讓側邊欄內容更緊湊 */
-    section[data-testid="stSidebar"] .block-container {
-        padding-top: 2rem;
+    /* 7. 修正 Radio Button 文字顏色 */
+    .stRadio label {
+        color: #31333F !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -561,7 +575,6 @@ def run_upload_mode(erosion, dilation, min_conf):
 # ==========================================
 def main():
     try:
-        st.title("HANDWRITING AI")
         st.sidebar.header("Settings")
         mode = st.sidebar.selectbox("Mode", ["📷 鏡頭 (Live)", "✍️ 手寫板 (Canvas)", "📂 上傳 (Upload)"], index=1)
         
