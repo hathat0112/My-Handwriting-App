@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V126)", 
+    page_title="Handwriting AI ", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
