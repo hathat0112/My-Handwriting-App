@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V122)", 
+    page_title="Handwriting AI (V123)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -551,7 +551,7 @@ def run_canvas_mode(erosion, dilation, min_conf, strict_mode):
             else:
                 st.info("Waiting for input...")
             
-            with st.expander("查看 AI 視覺 (Debug)"):
+            with st.expander("察看結果"):
                 st.image(draw_img, caption="Detection", channels="BGR", use_container_width=True)
         else:
             st.markdown("*Ready to analyze...*")
@@ -645,7 +645,7 @@ def run_upload_mode(erosion, dilation, min_conf, strict_mode):
             else:
                 st.warning("No digits found.")
             st.divider()
-            with st.expander("查看 AI 黑帽運算 (Debug)"):
+            with st.expander("察看結果"):
                 st.image(mask_img, use_container_width=True, caption="Split Mask (Eroded)")
 
 # ==========================================
