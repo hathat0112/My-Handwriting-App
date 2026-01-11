@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V101)", 
+    page_title="Handwriting AI (V102)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -154,8 +154,8 @@ def preprocess_input(roi):
 
 def draw_label(img, text, x, y, color=(0, 255, 255)):
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 1.2 # [V101] 字體加大，讓鏡頭模式看更清楚
-    thickness = 3
+    scale = 1.0 # 字體大小適中
+    thickness = 2
     (lw, lh), _ = cv2.getTextSize(text, font, scale, thickness)
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
@@ -192,7 +192,7 @@ def ensemble_predict(roi, min_conf):
     return final_lbl, final_conf, details
 
 # ==========================================
-# 2. 鏡頭模式 (V101: 顯示預測結果)
+# 2. 鏡頭模式 (V102: 強制降低解析度)
 # ==========================================
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -249,7 +249,7 @@ class LiveProcessor(VideoProcessorBase):
                 if len(self.cached_rois) > 0:
                     for (dx, dy, dw, dh, txt, box_color) in self.cached_rois:
                         cv2.rectangle(display_img, (dx, dy), (dx+dw, dy+dh), box_color, 2)
-                        draw_label(display_img, txt, dx, dy) # 修正：確保快取時也重繪標籤
+                        draw_label(display_img, txt, dx, dy)
                 if is_warming_up:
                     cv2.putText(display_img, "Initializing...", (20, h_f - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 return av.VideoFrame.from_ndarray(display_img, format="bgr24")
@@ -288,7 +288,6 @@ class LiveProcessor(VideoProcessorBase):
                     rx, ry = x + roi_rect[0], y + roi_rect[1]
                     box_color = (0, 0, 255) if is_warming_up else (0, 255, 0)
                     
-                    # [V101 關鍵修正] 顯示預測數字，而不只是編號
                     txt = str(final_lbl) 
                     
                     self.cached_rois.append((rx, ry, w, h, txt, box_color))
@@ -344,11 +343,19 @@ def run_camera_mode(erosion, dilation, min_conf):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v101-cam", 
+            key="v102-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
             async_processing=True,
+            # [V102 關鍵] 強制瀏覽器使用低解析度，大幅降低延遲
+            media_stream_constraints={
+                "video": {
+                    "width": {"min": 480, "ideal": 480, "max": 640},
+                    "height": {"min": 360, "ideal": 360, "max": 480},
+                    "frameRate": {"max": 30},
+                }
+            }
         )
     with col2:
         if ctx.video_processor:
