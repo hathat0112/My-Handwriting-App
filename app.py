@@ -4,7 +4,7 @@ import streamlit as st
 # 0. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Handwriting AI (V108)", 
+    page_title="Handwriting AI (V109)", 
     page_icon="✒️", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -118,10 +118,20 @@ except Exception as e:
     st.error(f"❌ 模型載入失敗: {e}")
     st.stop()
 
+# [V109 修復] 恢復 Erosion (腐蝕) 功能，讓拉桿生效
 def v65_morphology(binary_img, erosion, dilation):
     res = binary_img.copy()
+    
+    # 1. 優先執行切割 (如果使用者有設定)
+    if erosion > 0:
+        kernel_erode = np.ones((3,3), np.uint8)
+        res = cv2.erode(res, kernel_erode, iterations=erosion)
+
+    # 2. 閉運算：修補因切割產生的微小斷裂
     kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     res = cv2.morphologyEx(res, cv2.MORPH_CLOSE, kernel_rect, iterations=2)
+    
+    # 3. 膨脹：恢復筆畫厚度
     iter_dil = max(1, dilation)
     kernel_dil = np.ones((3,3), np.uint8)
     res = cv2.dilate(res, kernel_dil, iterations=iter_dil)
@@ -192,7 +202,7 @@ def draw_label(img, text, x, y, color=(0, 255, 255)):
     cv2.rectangle(img, (x, y - lh - 10), (x + lw, y), (0, 0, 0), -1)
     cv2.putText(img, text, (x, y - 5), font, scale, color, thickness)
 
-# [V108] 將嚴格模式的 CNN 強制覆蓋門檻調整為 0.85
+# [V108] 寬容嚴格模式：CNN > 85% 即通過
 def ensemble_predict(roi, min_conf, strict_mode=False):
     cnn_in, flat_in = preprocess_input(roi)
     pred_cnn = cnn_model.predict(cnn_in, verbose=0)[0]
@@ -214,13 +224,11 @@ def ensemble_predict(roi, min_conf, strict_mode=False):
     
     # 嚴格模式邏輯
     if strict_mode:
-        # 如果大家意見不合...
         if (knn_model and lbl_knn != lbl_cnn) or (svm_model and lbl_svm != lbl_cnn):
-            # [V108 修改] 只要 CNN 信心 > 85%，就強制採信
+            # CNN 信心 > 85% 則強制保留
             if final_conf < 0.85:
                 return -1, 0.0, " (Disagree)"
         
-        # 即使大家同意，信心太低也不行
         if final_conf < 0.8:
             return -1, 0.0, " (Low Conf)"
 
@@ -350,7 +358,7 @@ def run_camera_mode(erosion, dilation, min_conf, strict_mode):
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(
-            key="v108-cam", 
+            key="v109-cam", 
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=LiveProcessor,
